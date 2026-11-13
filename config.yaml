@@ -1,0 +1,7 @@
+# --source on the CLI overrides this value.  Set this if you prefer config-only runs.
+source: ""
+segment_seconds: 6
+retention_seconds: 900
+segments_dir: data/segments
+reconnect_max_backoff_seconds: 60
+is_live: false

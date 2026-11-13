@@ -223,6 +223,50 @@ Technical prototyping and distribution are separate workstreams. Use test footag
 
 **Implement Stage 1:** confirm operating system and hardware, install FFmpeg and Python, build the segmented recorder and rolling-buffer retention, and test with a local recording before connecting a live source.
 
+## Running Stage 1
+
+Stage 1 is implemented as a local FFmpeg-supervised capture process. It needs Python 3.11+ and both `ffmpeg` and `ffprobe` on `PATH`. On Windows, download a trusted FFmpeg build, add its `bin` directory to `PATH`, open a new PowerShell window, and confirm:
+
+```powershell
+python --version
+ffmpeg -version
+ffprobe -version
+```
+
+Create an environment and install the two Python dependencies:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+Set the six values in `config.yaml`, or pass a permitted source directly on the command line. A local file with `is_live: false` is intentionally read with FFmpeg's `-re` flag, so it simulates a real-time source.
+
+```powershell
+python -m app.ingestion --source .\path\to\authorized-recording.mp4 --config config.yaml
+```
+
+Segments are written to `segments_dir` as MPEG-TS files with a timestamp in the filename. `manifest.sqlite3` in that directory stores the authoritative UTC capture-start time, duration, status, and source ID. Copy-mode segmentation preserves source packets and only starts a new segment at existing keyframes, so actual durations can vary with the source GOP size.
+
+Run unit tests without FFmpeg:
+
+```powershell
+python -m pytest -m "not integration"
+```
+
+After FFmpeg is installed, run the complete test suite (the integration capture test is approximately two minutes):
+
+```powershell
+python -m pytest
+```
+
+The 30-minute local acceptance run creates its own test source by default and reports playable/corrupt segment counts, timestamp drift, and retention cleanup. It is intentionally not run as part of ordinary testing:
+
+```powershell
+python scripts\soak_test.py --duration-seconds 1800
+```
+
 ## License
 
 To be determined before public release.
