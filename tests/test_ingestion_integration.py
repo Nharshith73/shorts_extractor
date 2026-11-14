@@ -3,8 +3,9 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -23,7 +24,6 @@ def make_synthetic_source(path: Path, seconds: int) -> None:
     """Create keyframe-friendly gameplay-like test video with burned-in PTS and tone."""
     video_filter = (
         "testsrc2=size=320x180:rate=30,"
-        "drawtext=fontcolor=white:fontsize=18:text='PTS %{pts\\:hms}':x=10:y=10"
     )
     subprocess.run(
         [
@@ -61,10 +61,10 @@ def make_synthetic_source(path: Path, seconds: int) -> None:
     )
 
 
-def wait_for(predicate: object, timeout_seconds: float = 12.0) -> bool:
+def wait_for(predicate: Callable[[], bool], timeout_seconds: float = 12.0) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        if callable(predicate) and predicate():
+        if predicate():
             return True
         time.sleep(0.1)
     return False
@@ -96,6 +96,15 @@ def test_two_minute_ingestion_and_retention(tmp_path: Path) -> None:
         assert current.wall_start_utc >= previous.wall_start_utc
         unexplained_gap = (current.wall_start_utc - previous.wall_end_utc).total_seconds()
         assert unexplained_gap < 2.0
+        if (
+            current.session_id == previous.session_id
+            and not previous.timing_reanchored
+            and not current.timing_reanchored
+        ):
+            contiguous_delta = (
+                current.wall_start_utc - previous.wall_end_utc
+            ).total_seconds()
+            assert abs(contiguous_delta) < 0.05
     assert not [record for record in records if record.status == "discontinuity"]
 
     latest_end = max(record.wall_end_utc for record in completed)
@@ -120,16 +129,39 @@ def test_reader_restarts_after_process_is_killed(tmp_path: Path) -> None:
     reader.start()
     try:
         assert wait_for(lambda: reader.current_process is not None)
+        assert wait_for(
+            lambda: any(
+                record.status == "complete"
+                for record in reader.buffer.manifest.all_records(reader.source_id)
+            )
+        )
         process = reader.current_process
         assert process is not None
         process.kill()
         assert wait_for(lambda: reader.restart_count >= 1)
         assert wait_for(lambda: reader.current_process is not None and reader.current_process is not process)
-        discontinuities = [
+        assert wait_for(
+            lambda: len(
+                {
+                    record.session_id
+                    for record in reader.buffer.manifest.all_records(reader.source_id)
+                    if record.status == "complete"
+                }
+            ) >= 2
+        )
+        completed = [
             record
             for record in reader.buffer.manifest.all_records(reader.source_id)
-            if record.status == "discontinuity"
+            if record.status == "complete"
         ]
-        assert discontinuities
+        assert len({record.session_id for record in completed}) >= 2
+        boundaries = reader.buffer.get_discontinuities(
+            datetime(1970, 1, 1, tzinfo=UTC), datetime(2100, 1, 1, tzinfo=UTC)
+        )
+        assert any(
+            boundary.previous_session_id != boundary.next_session_id
+            and boundary.previous_session_id is not None
+            for boundary in boundaries
+        )
     finally:
         reader.stop()

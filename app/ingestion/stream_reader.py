@@ -12,7 +12,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -32,6 +32,7 @@ class StreamConfig:
     retention_seconds: float = 900.0
     segments_dir: Path = Path("data/segments")
     reconnect_max_backoff_seconds: float = 60.0
+    reanchor_threshold_seconds: float = 2.0
     is_live: bool = False
 
     def validate(self) -> None:
@@ -43,6 +44,8 @@ class StreamConfig:
             raise ValueError("retention_seconds must be positive")
         if self.reconnect_max_backoff_seconds <= 0:
             raise ValueError("reconnect_max_backoff_seconds must be positive")
+        if self.reanchor_threshold_seconds <= 0:
+            raise ValueError("reanchor_threshold_seconds must be positive")
 
     @property
     def stall_seconds(self) -> float:
@@ -64,6 +67,7 @@ def load_config(config_path: Path, source_override: str | None = None) -> Stream
         "retention_seconds",
         "segments_dir",
         "reconnect_max_backoff_seconds",
+        "reanchor_threshold_seconds",
         "is_live",
     }
     unknown_keys = set(raw) - allowed_keys
@@ -86,6 +90,7 @@ def load_config(config_path: Path, source_override: str | None = None) -> Stream
         retention_seconds=float(raw.get("retention_seconds", 900)),
         segments_dir=segments_dir,
         reconnect_max_backoff_seconds=float(raw.get("reconnect_max_backoff_seconds", 60)),
+        reanchor_threshold_seconds=float(raw.get("reanchor_threshold_seconds", 2.0)),
         is_live=raw.get("is_live", False),
     )
     if not isinstance(config.is_live, bool):
@@ -129,12 +134,43 @@ def probe_duration(path: Path, ffprobe_binary: str = "ffprobe") -> float:
 
 
 @dataclass(slots=True)
+class SessionTimestampTracker:
+    """Build a contiguous wall-clock timeline for one FFmpeg session."""
+
+    last_wall_start_utc: datetime | None = None
+    last_duration: float | None = None
+
+    def resolve(
+        self,
+        fs_created_utc: datetime,
+        duration: float,
+        reanchor_threshold_seconds: float,
+    ) -> tuple[datetime, bool, float]:
+        """Choose a start time from the prior media duration or filesystem time."""
+        filesystem_time = fs_created_utc.astimezone(UTC)
+        if self.last_wall_start_utc is None or self.last_duration is None:
+            resolved = filesystem_time
+            timing_reanchored = False
+            drift_seconds = 0.0
+        else:
+            expected = self.last_wall_start_utc + timedelta(seconds=self.last_duration)
+            drift_seconds = (filesystem_time - expected).total_seconds()
+            timing_reanchored = abs(drift_seconds) > reanchor_threshold_seconds
+            resolved = filesystem_time if timing_reanchored else expected
+        self.last_wall_start_utc = resolved
+        self.last_duration = duration
+        return resolved, timing_reanchored, drift_seconds
+
+
+@dataclass(slots=True)
 class _Session:
     """FFmpeg process state for a single connection attempt."""
 
     process: subprocess.Popen[str]
     list_path: Path
     finished_paths: set[Path]
+    session_id: str
+    timestamp_tracker: SessionTimestampTracker
 
 
 class StreamReader:
@@ -165,6 +201,7 @@ class StreamReader:
         self._process_lock = threading.Lock()
         self._current_process: subprocess.Popen[str] | None = None
         self._restart_count = 0
+        self._completed_segment_count = 0
 
     @property
     def current_process(self) -> subprocess.Popen[str] | None:
@@ -176,6 +213,11 @@ class StreamReader:
     def restart_count(self) -> int:
         """Number of reconnect attempts completed in this reader run."""
         return self._restart_count
+
+    @property
+    def completed_segment_count(self) -> int:
+        """Completed, playable segments produced during this reader run."""
+        return self._completed_segment_count
 
     @property
     def is_running(self) -> bool:
@@ -269,7 +311,7 @@ class StreamReader:
 
                 reason, return_code, made_progress = self._monitor_session(session)
                 self._finalize_session(session)
-                self.buffer.manifest.abandon_writing(self.source_id)
+                self.buffer.manifest.abandon_writing(self.source_id, session.session_id)
                 self._set_current_process(None)
 
                 if reason == "stopped" or self._stop_event.is_set():
@@ -303,12 +345,11 @@ class StreamReader:
             self.buffer.stop_cleanup()
 
     def _record_reconnect(self, reason: str) -> None:
-        self.buffer.manifest.add_discontinuity(self._clock(), self.source_id)
         self._restart_count += 1
         LOGGER.warning("Reconnect %d: %s", self._restart_count, reason)
 
     def _launch_session(self) -> _Session | None:
-        session_id = uuid.uuid4().hex[:10]
+        session_id = uuid.uuid4().hex
         list_path = self.buffer.segments_dir / f".segment-list-{session_id}.csv"
         # %%06d remains a segment index after FFmpeg's strftime expansion.  A
         # per-session UUID prevents collisions when a reconnect occurs inside
@@ -317,7 +358,11 @@ class StreamReader:
             f"segment_{session_id}_%Y%m%dT%H%M%S_%%06d.ts"
         )
         command = self._ffmpeg_command(output_pattern, list_path)
-        LOGGER.info("Starting FFmpeg capture for source_id=%s", self.source_id)
+        LOGGER.info(
+            "Starting FFmpeg capture for source_id=%s session_id=%s",
+            self.source_id,
+            session_id,
+        )
         LOGGER.debug("FFmpeg command: %s", command)
         try:
             process = subprocess.Popen(
@@ -335,7 +380,13 @@ class StreamReader:
             return None
         self._set_current_process(process)
         self._drain_process_output(process)
-        return _Session(process=process, list_path=list_path, finished_paths=set())
+        return _Session(
+            process=process,
+            list_path=list_path,
+            finished_paths=set(),
+            session_id=session_id,
+            timestamp_tracker=SessionTimestampTracker(),
+        )
 
     def _ffmpeg_command(self, output_pattern: Path, list_path: Path) -> list[str]:
         command = [
@@ -388,7 +439,7 @@ class StreamReader:
         last_segment_at = time.monotonic()
         made_progress = False
         while not self._stop_event.is_set():
-            self._discover_open_segment_files()
+            self._discover_open_segment_files(session.session_id)
             newly_completed = self._collect_completed_segments(session)
             if newly_completed:
                 last_segment_at = time.monotonic()
@@ -409,7 +460,7 @@ class StreamReader:
         self._terminate_process(session.process)
         return "stopped", session.process.poll(), made_progress
 
-    def _discover_open_segment_files(self) -> None:
+    def _discover_open_segment_files(self, session_id: str) -> None:
         """Track every new file as ``writing`` before FFmpeg closes it.
 
         FFmpeg's CSV segment list is the authoritative commit record, but
@@ -418,7 +469,7 @@ class StreamReader:
         """
         for path in self.buffer.segments_dir.glob("segment_*.ts"):
             if self.buffer.manifest.get_by_path(path) is None:
-                self._register_writing_file(path)
+                self._register_writing_file(path, session_id)
 
     def _finalize_session(self, session: _Session) -> None:
         """Read the final FFmpeg segment-list entries after process exit."""
@@ -454,19 +505,41 @@ class StreamReader:
             path = path.resolve()
             if path in session.finished_paths or not path.exists():
                 continue
-            self._register_writing_file(path)
+            self._register_writing_file(path, session.session_id)
             try:
                 duration = probe_duration(path, self.ffprobe_binary)
             except (OSError, subprocess.SubprocessError, ValueError) as exc:
                 LOGGER.warning("Closed segment is not playable yet %s: %s", path, exc)
                 continue
-            if self.buffer.manifest.complete(path, duration):
+            record = self.buffer.manifest.get_by_path(path)
+            if record is None:
+                LOGGER.warning("Manifest entry disappeared before completion: %s", path)
+                continue
+            wall_start_utc, timing_reanchored, drift_seconds = session.timestamp_tracker.resolve(
+                record.fs_created_utc,
+                duration,
+                self.config.reanchor_threshold_seconds,
+            )
+            if timing_reanchored:
+                LOGGER.warning(
+                    "Re-anchoring segment %s by %+0.3fs (threshold %.3fs)",
+                    path.name,
+                    drift_seconds,
+                    self.config.reanchor_threshold_seconds,
+                )
+            if self.buffer.manifest.complete(
+                path,
+                duration,
+                wall_start_utc=wall_start_utc,
+                timing_reanchored=timing_reanchored,
+            ):
                 completed += 1
+                self._completed_segment_count += 1
                 LOGGER.info("Completed segment %s (%.3fs)", path.name, duration)
             session.finished_paths.add(path)
         return completed
 
-    def _register_writing_file(self, path: Path) -> None:
+    def _register_writing_file(self, path: Path, session_id: str) -> None:
         """Insert the capture-start wall time before transitioning to complete."""
         if self.buffer.manifest.get_by_path(path) is not None:
             return
@@ -477,7 +550,7 @@ class StreamReader:
             wall_start = datetime.fromtimestamp(stat.st_ctime, UTC)
         except OSError:
             wall_start = self._clock()
-        self.buffer.manifest.add_writing(path, wall_start, self.source_id)
+        self.buffer.manifest.add_writing(path, wall_start, self.source_id, session_id)
 
     def _drain_process_output(self, process: subprocess.Popen[str]) -> None:
         """Drain pipes so verbose FFmpeg output cannot block the subprocess."""

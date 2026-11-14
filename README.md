@@ -241,13 +241,13 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Set the six values in `config.yaml`, or pass a permitted source directly on the command line. A local file with `is_live: false` is intentionally read with FFmpeg's `-re` flag, so it simulates a real-time source.
+Set the seven values in `config.yaml`, or pass a permitted source directly on the command line. `reanchor_threshold_seconds` defaults to `2.0`: within a session, segment timestamps are chained from media duration unless the filesystem timestamp differs by more than this amount. A local file with `is_live: false` is intentionally read with FFmpeg's `-re` flag, so it simulates a real-time source.
 
 ```powershell
 python -m app.ingestion --source .\path\to\authorized-recording.mp4 --config config.yaml
 ```
 
-Segments are written to `segments_dir` as MPEG-TS files with a timestamp in the filename. `manifest.sqlite3` in that directory stores the authoritative UTC capture-start time, duration, status, and source ID. Copy-mode segmentation preserves source packets and only starts a new segment at existing keyframes, so actual durations can vary with the source GOP size.
+Segments are written to `segments_dir` as MPEG-TS files with a timestamp in the filename. `manifest.sqlite3` stores the corrected UTC capture-start time, raw filesystem creation time (`fs_created_utc`), duration, status, source ID, persistent pin flag, re-anchor flag, and FFmpeg session ID. A new session ID is created after every reconnect, so downstream stages can identify candidate windows spanning a capture gap. Existing manifests are migrated in place on startup. Copy-mode segmentation preserves source packets and only starts a new segment at existing keyframes, so actual durations can vary with the source GOP size.
 
 Run unit tests without FFmpeg:
 
@@ -261,10 +261,11 @@ After FFmpeg is installed, run the complete test suite (the integration capture 
 python -m pytest
 ```
 
-The 30-minute local acceptance run creates its own test source by default and reports playable/corrupt segment counts, timestamp drift, and retention cleanup. It is intentionally not run as part of ordinary testing:
+The 30-minute local acceptance run creates its own test source by default and reports per-session manifest/file counts, timestamp correction, capture-end alignment, and retention cleanup. It deletes and recreates its work directory at the beginning of every run; `--work-dir` is therefore limited to a child of this repository's `data` directory. It is intentionally not run as part of ordinary testing. Both duration and retention can be shortened for a local check:
 
 ```powershell
 python scripts\soak_test.py --duration-seconds 1800
+python scripts\soak_test.py --duration-seconds 120 --retention-seconds 60
 ```
 
 ## License
