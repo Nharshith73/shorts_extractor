@@ -69,6 +69,8 @@ def load_config(config_path: Path, source_override: str | None = None) -> Stream
         "reconnect_max_backoff_seconds",
         "reanchor_threshold_seconds",
         "is_live",
+        "detection",
+        "candidates",
     }
     unknown_keys = set(raw) - allowed_keys
     if unknown_keys:
@@ -240,10 +242,7 @@ class StreamReader:
             raise RuntimeError("StreamReader is already running")
         self._validate_binaries()
         self._stop_event.clear()
-        # A prior unclean process cannot still be writing once this sole
-        # reader is starting.  Preserve the file for inspection, but ensure it
-        # is never considered a valid segment.
-        self.buffer.manifest.abandon_writing(self.source_id)
+        self.recover_unfinished()
         self.buffer.start_cleanup()
         self._supervisor = threading.Thread(
             target=self._supervise,
@@ -251,6 +250,41 @@ class StreamReader:
             daemon=True,
         )
         self._supervisor.start()
+
+    def recover_unfinished(self) -> None:
+        """Probe incomplete files left by a previous capture before cleanup starts.
+
+        The segment directory is owned by a single source/reader. Orphan names
+        retain the FFmpeg session identifier, although their source cannot be
+        inferred from the filename alone.
+        """
+        manifest = self.buffer.manifest
+        records = manifest.all_records(self.source_id)
+        unfinished = [record for record in records if record.status == "writing"
+                      or (record.status == "abandoned" and record.path is not None and record.path.exists())]
+        for path in self.buffer.segments_dir.glob("segment_*.ts"):
+            if manifest.get_by_path(path) is None:
+                parts = path.name.split("_")
+                session_id = parts[1] if len(parts) > 2 else "recovered-orphan"
+                self._register_writing_file(path, session_id)
+                record = manifest.get_by_path(path)
+                if record is not None:
+                    unfinished.append(record)
+        for record in unfinished:
+            if record.path is None:
+                continue
+            try:
+                duration = probe_duration(record.path, self.ffprobe_binary)
+                if record.status == "abandoned":
+                    with manifest._connect() as connection:
+                        connection.execute("UPDATE segments SET status='writing' WHERE id=? AND status='abandoned'", (record.id,))
+                manifest.complete(record.path, duration)
+                LOGGER.info("Recovered segment %s (%.3fs)", record.path, duration)
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                LOGGER.warning("Unable to recover segment %s: %s", record.path, exc)
+        if unfinished:
+            manifest.abandon_writing(self.source_id)
+            manifest.add_discontinuity(self._clock(), self.source_id, "restart")
 
     def run(self) -> None:
         """Run until a finite file completes or :meth:`stop` is called."""
@@ -467,7 +501,7 @@ class StreamReader:
         discovering files independently prevents the cleanup worker from ever
         treating an in-progress or crash-truncated file as a completed one.
         """
-        for path in self.buffer.segments_dir.glob("segment_*.ts"):
+        for path in self.buffer.segments_dir.glob(f"segment_{session_id}_*.ts"):
             if self.buffer.manifest.get_by_path(path) is None:
                 self._register_writing_file(path, session_id)
 

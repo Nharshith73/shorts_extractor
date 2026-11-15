@@ -6,3 +6,38 @@ segments_dir: data/segments
 reconnect_max_backoff_seconds: 60
 reanchor_threshold_seconds: 2.0
 is_live: false
+
+detection:
+  baseline_seconds: 300
+  warmup_seconds: 60
+  z_threshold: 3.0
+  single_feature_threshold: 6.0
+  min_separation_seconds: 20
+  sample_rate: 16000
+  video_fps: 4
+  reprocess_poll_seconds: 2.0
+  weights:
+    audio_rms_db: 1.0
+    voice_energy_db: 1.0
+    onset_strength: 1.0
+    motion: 1.0
+    cut_change: 1.0
+  relative_scale_floor: 0.01
+  scale_floors:
+    audio_rms_db: 0.5
+    voice_energy_db: 0.5
+    onset_strength: 0.001
+    motion: 1.0
+    cut_change: 0.01
+
+candidates:
+  pre_roll_seconds: 15
+  post_roll_seconds: 10
+  min_seconds: 20
+  max_seconds: 60
+  merge_gap_seconds: 3
+  grace_seconds: 0.5
+  wait_timeout_seconds: 180
+  poll_seconds: 2
+  output_dir: data/candidates
+  video_encoder: libx264

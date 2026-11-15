@@ -6,3 +6,4 @@ __pycache__/
 data/segments/*
 !data/segments/.gitkeep
 data/soak-test/
+data/candidates/

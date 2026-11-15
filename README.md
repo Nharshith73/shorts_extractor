@@ -268,6 +268,70 @@ python scripts\soak_test.py --duration-seconds 1800
 python scripts\soak_test.py --duration-seconds 120 --retention-seconds 60
 ```
 
+## Running Stage 2
+
+Stage 2 performs local, lightweight audio and video analysis only—no LLM, speech-to-text, chat API, or publishing integration is involved. It needs the Stage 1 `ffmpeg`/`ffprobe` setup plus NumPy and SciPy from `requirements.txt`.
+
+Detection settings are under `detection:` in `config.yaml`. `scale_floors` and `relative_scale_floor` keep near-constant audio or video baselines from turning tiny codec fluctuations into large z-scores; each feature uses the largest of scaled MAD, its absolute floor, and the relative floor. Raw one-second features are persisted in the Stage 1 manifest database, making score thresholds and weights re-tunable without decoding media again.
+
+Follow newly completed segments while Stage 1 is running:
+
+```powershell
+python -m app.detection --config config.yaml
+```
+
+Analyze the current backlog once and exit:
+
+```powershell
+python -m app.detection --config config.yaml --once
+```
+
+For offline tuning, write an event timeline and raw feature CSV from an authorized local recording:
+
+```powershell
+python -m app.detection.offline --video .\recording.mp4 --out .\timeline.json --features .\features.csv
+```
+
+The offline runner logs its real-time factor (footage seconds divided by processing seconds). Benchmark a 10-minute local file on the intended CPU; the initial target is at least `10x` real time.
+
+Evaluate a timeline against `labels.csv` (`time_seconds,note`), with optional chronological tune/holdout splitting:
+
+```powershell
+python -m app.detection.evaluate --events .\timeline.json --labels .\labels.csv --tolerance 8
+python -m app.detection.evaluate --events .\timeline.json --labels .\labels.csv --tolerance 8 --split
+```
+
+Explain the existing feature CSV around each label without decoding the video again:
+
+```powershell
+python -m app.detection.explain --features .\features.csv --labels .\data\labels\labels.csv --tolerance 8
+```
+
+The explanation prints the effective config, per-feature maxima and times, rule outcomes, and blocking reasons. Its background comparison samples 200 full-width windows with replacement using seed 42; they do not overlap any labeled window. Scale-floor suppression is a per-bin counterfactual with the configured absolute and relative floors disabled.
+
+## Running Stage 3
+
+Stage 3 reads the existing `events` table and exports source-orientation MP4 candidates with JSON sidecars. Install the existing requirements and make `ffmpeg` and `ffprobe` available on `PATH`.
+
+```powershell
+python -m app.clips --config config.yaml
+python -m app.clips --config config.yaml --once
+```
+
+Settings live under `candidates:`. Defaults are 15 seconds of pre-roll, 10 seconds of post-roll, 20–60 second clips, a 3 second merge gap, a 0.5 second live-edge grace period, and a 180 second wait timeout. `output_dir` defaults to `data/candidates`, relative to the config file. The final cut is re-encoded using `libx264 -preset veryfast -crf 18` and AAC, with `+faststart`; `video_encoder: h264_nvenc` selects NVIDIA encoding with preset p4 and CQ 18 when supported by the installed FFmpeg/GPU.
+
+Windows start before the earlier of the region start and peak, and end after the region end. Long windows are limited to 60 seconds while retaining the peak and at least its configured pre-roll; short windows extend to 20 seconds. Windows from the same source/session merge when they overlap or are at most 3 seconds apart and the union is at most 60 seconds. Otherwise they remain separate. Merged windows use the highest-scoring event's peak when choosing the side of a discontinuity. Gap trimming may reduce the normal pre-roll; windows shorter than the minimum after trimming are `rejected_gap`.
+
+The candidate ledger snapshots event IDs/scores and deduplicates by source and peak time, which survives detection replacing its event rows. Later events can merge into a waiting candidate; exported candidates retain their original snapshot. Available segments plus one neighboring segment on each side are reserved immediately; later segments are reserved on each poll. Shared reservations keep overlapping candidates protected independently. Candidates wait for completed coverage through the end plus grace, become `expired` when coverage has already disappeared, and become `timeout` if coverage does not arrive. Terminal statuses release their reservations, preserving manual pins. Successful exports produce `<id>.mp4` and `<id>.json`. Interrupted `extracting` rows are checked and retried by the next worker; output replacement is atomic per file. One OS-locked worker per manifest prevents simultaneous exports of the same candidate.
+
+Ingestion startup now probes unfinished manifest rows and orphan segment files before retention starts. Playable MPEG-TS files are recovered with their measured duration and original session when identifiable; corrupt/missing files become abandoned. A restart boundary is recorded. A segment directory must belong to one ingestion source; an orphan filename identifies its session but cannot identify its source independently. Recovery verifies playable media, not that an interrupted final segment contains every frame the source originally intended.
+
+Stage 3 unit and media tests run with the normal suite:
+
+```powershell
+python -m pytest -v -rs
+```
+
 ## License
 
 To be determined before public release.

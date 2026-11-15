@@ -330,11 +330,14 @@ class SegmentManifest:
             return 0
         placeholders = ", ".join("?" for _ in ids)
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 f"UPDATE segments SET pinned = 1 "
                 f"WHERE id IN ({placeholders}) AND status = 'complete'",
                 ids,
             )
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE name='segment_reservations'").fetchone():
+                connection.execute(f"UPDATE segment_reservations SET was_pinned=1 WHERE segment_id IN ({placeholders})", ids)
         return cursor.rowcount
 
     def unpin(self, segment_ids: Iterable[int]) -> int:
@@ -344,10 +347,19 @@ class SegmentManifest:
             return 0
         placeholders = ", ".join("?" for _ in ids)
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            reserved: set[int] = set()
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE name='segment_reservations'").fetchone():
+                reserved = {int(row[0]) for row in connection.execute(f"SELECT segment_id FROM segment_reservations WHERE segment_id IN ({placeholders})", ids)}
+                connection.execute(f"UPDATE segment_reservations SET was_pinned=0 WHERE segment_id IN ({placeholders})", ids)
+            unreserved_ids = tuple(segment_id for segment_id in ids if segment_id not in reserved)
+            if not unreserved_ids:
+                return len(reserved)
+            placeholders = ", ".join("?" for _ in unreserved_ids)
             cursor = connection.execute(
                 f"UPDATE segments SET pinned = 0 "
                 f"WHERE id IN ({placeholders}) AND status = 'complete'",
-                ids,
+                unreserved_ids,
             )
         return cursor.rowcount
 
@@ -409,9 +421,16 @@ class RollingBuffer:
             if record.pinned or record.wall_end_utc >= cutoff:
                 continue
             try:
-                if record.path is not None and record.path.exists():
-                    record.path.unlink()
-                self.manifest.delete_record(record.id)
+                # Serialize the final pin check with candidate reservations.
+                # File removal precedes row removal under the same write lock.
+                with self.manifest._connect() as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    current = connection.execute("SELECT pinned,status FROM segments WHERE id=?", (record.id,)).fetchone()
+                    if current is None or current["pinned"] or current["status"] == "writing":
+                        continue
+                    if record.path is not None:
+                        record.path.unlink(missing_ok=True)
+                    connection.execute("DELETE FROM segments WHERE id=?", (record.id,))
                 removed += 1
                 LOGGER.debug("Removed expired manifest entry %s", record.id)
             except OSError as exc:
@@ -452,7 +471,8 @@ class RollingBuffer:
             self._cleanup_thread.join(timeout=5.0)
             self._cleanup_thread = None
 
-    def get_segments(self, start_utc: datetime, end_utc: datetime) -> list[SegmentRecord]:
+    def get_segments(self, start_utc: datetime, end_utc: datetime, *, source_id: str | None = None,
+                     session_id: str | None = None) -> list[SegmentRecord]:
         """Return playable segments that overlap the requested UTC interval."""
         start = ensure_utc(start_utc)
         end = ensure_utc(end_utc)
@@ -463,6 +483,8 @@ class RollingBuffer:
             record
             for record in candidates
             if record.wall_start_utc < end and record.wall_end_utc > start
+            and (source_id is None or record.source_id == source_id)
+            and (session_id is None or record.session_id == session_id)
         ]
 
     def get_discontinuities(
@@ -522,6 +544,8 @@ class RollingBuffer:
         output_path: Path,
         *,
         ffmpeg_binary: str = "ffmpeg",
+        source_id: str | None = None,
+        session_id: str | None = None,
     ) -> list[SegmentRecord]:
         """Concatenate segments covering a time range using FFmpeg's concat demuxer.
 
@@ -529,7 +553,7 @@ class RollingBuffer:
         copy-mode concat jobs, the inputs must have compatible codecs and time
         bases; callers can choose an ``.ts`` or ``.mp4`` output filename.
         """
-        records = self.get_segments(start_utc, end_utc)
+        records = self.get_segments(start_utc, end_utc, source_id=source_id, session_id=session_id)
         if not records:
             raise ValueError("no playable segments cover the requested time range")
         if any(record.path is None for record in records):
@@ -546,7 +570,7 @@ class RollingBuffer:
                 for record in records:
                     assert record.path is not None
                     # The concat format escapes literal single quotes this way.
-                    escaped = record.path.resolve().as_posix().replace("'", r"'\\''")
+                    escaped = record.path.resolve().as_posix().replace("'", "'\\''")
                     list_file.write(f"file '{escaped}'\n")
             subprocess.run(
                 [
