@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
-from typing import Iterable, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -12,28 +13,44 @@ from .features import FEATURE_NAMES
 from .models import DetectedEvent, FeatureBin, ScoredBin
 
 
+@dataclass(frozen=True, slots=True)
+class AuxiliaryFeatures:
+    """Optional timestamp-aligned raw signals supplied by an external adapter."""
+
+    values: Mapping[datetime, Mapping[str, float]]
+    weights: Mapping[str, float]
+    scale_floors: Mapping[str, float]
+
+
 def robust_zscore(
     value: float,
     baseline: Sequence[float],
     *,
     scale_floor: float = 0.0,
     relative_scale_floor: float = 0.0,
+    clip: bool = True,
 ) -> float:
-    """Return a non-negative, MAD-scaled z-score clipped to the range 0–10."""
+    """Return a MAD-scaled z-score, normally clipped to 0–10.
+
+    ``clip=False`` exposes the signed value with the same baseline and floors.
+    """
     if not baseline:
         return 0.0
     values = np.asarray(baseline, dtype=np.float64)
     median = float(np.median(values))
     mad = float(np.median(np.abs(values - median)))
     scale = max(1.4826 * mad, scale_floor, abs(median) * relative_scale_floor, 1e-8)
-    return float(np.clip((value - median) / scale, 0.0, 10.0))
+    z_score = (value - median) / scale
+    return float(np.clip(z_score, 0.0, 10.0) if clip else z_score)
 
 
 def _feature_value(feature: FeatureBin, name: str) -> float:
     return float(getattr(feature, name))
 
 
-def score_feature_bins(features: Sequence[FeatureBin], config: DetectionConfig) -> list[ScoredBin]:
+def score_feature_bins(features: Sequence[FeatureBin], config: DetectionConfig,
+                       auxiliary: AuxiliaryFeatures | None = None, *,
+                       include_unclipped: bool = False) -> list[ScoredBin]:
     """Score ordered, single-session bins against trailing median/MAD baselines."""
     if not features:
         return []
@@ -53,10 +70,32 @@ def score_feature_bins(features: Sequence[FeatureBin], config: DetectionConfig) 
                 [_feature_value(item, name) for item in prior],
                 scale_floor=config.scale_floors[name],
                 relative_scale_floor=config.relative_scale_floor,
+                clip=not include_unclipped,
             )
             for name in FEATURE_NAMES
         }
+        unclipped = dict(z_scores) if include_unclipped else None
+        if include_unclipped:
+            z_scores = {name: float(np.clip(value, 0.0, 10.0)) for name, value in z_scores.items()}
         score = sum(config.weights.get(name, 0.0) * z_scores[name] for name in FEATURE_NAMES)
+        unclipped_score = sum(config.weights.get(name, 0.0) * value for name, value in unclipped.items()) if unclipped is not None else None
+        if auxiliary is not None:
+            for name, weight in auxiliary.weights.items():
+                if weight <= 0:
+                    continue
+                component = robust_zscore(
+                    auxiliary.values.get(feature.wall_utc, {}).get(name, 0.0),
+                    [auxiliary.values.get(item.wall_utc, {}).get(name, 0.0) for item in prior],
+                    scale_floor=auxiliary.scale_floors[name],
+                    relative_scale_floor=config.relative_scale_floor,
+                    clip=not include_unclipped,
+                )
+                if unclipped is not None:
+                    unclipped[name] = component
+                    unclipped_score += weight * component
+                    component = float(np.clip(component, 0.0, 10.0))
+                z_scores[name] = component
+                score += weight * z_scores[name]
         above_threshold = sum(z_score >= config.z_threshold for z_score in z_scores.values())
         qualifying_signal = (
             above_threshold >= 2
@@ -69,6 +108,8 @@ def score_feature_bins(features: Sequence[FeatureBin], config: DetectionConfig) 
                 z_scores=z_scores,
                 score=float(score),
                 qualifies=elapsed >= config.warmup_seconds and qualifying_signal,
+                unclipped_z_scores=unclipped,
+                unclipped_score=unclipped_score,
             )
         )
     return scored
@@ -109,6 +150,8 @@ def pick_events(scored: Sequence[ScoredBin], config: DetectionConfig) -> list[De
                 + timedelta(seconds=region[-1].feature.bin_seconds),
                 score=peak.score,
                 components=peak.z_scores,
+                unclipped_z_scores=peak.unclipped_z_scores,
+                unclipped_score=peak.unclipped_score,
             )
         )
     selected: list[DetectedEvent] = []
@@ -122,7 +165,8 @@ def pick_events(scored: Sequence[ScoredBin], config: DetectionConfig) -> list[De
     return sorted(selected, key=lambda event: event.peak_wall_utc)
 
 
-def detect_events(features: Sequence[FeatureBin], config: DetectionConfig) -> tuple[list[ScoredBin], list[DetectedEvent]]:
+def detect_events(features: Sequence[FeatureBin], config: DetectionConfig,
+                  auxiliary: AuxiliaryFeatures | None = None) -> tuple[list[ScoredBin], list[DetectedEvent]]:
     """Score one session and return bins plus qualified, separated events."""
-    scored = score_feature_bins(features, config)
+    scored = score_feature_bins(features, config, auxiliary)
     return scored, pick_events(scored, config)

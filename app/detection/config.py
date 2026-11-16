@@ -87,6 +87,7 @@ def load_detection_config(config_path: Path) -> DetectionConfig:
         "weights",
         "scale_floors",
         "relative_scale_floor",
+        "chat",
     }
     unknown = set(section) - allowed
     if unknown:

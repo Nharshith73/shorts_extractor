@@ -30,6 +30,8 @@ class ScoredBin:
     z_scores: dict[str, float]
     score: float
     qualifies: bool
+    unclipped_z_scores: dict[str, float] | None = None
+    unclipped_score: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,3 +45,5 @@ class DetectedEvent:
     end_wall_utc: datetime
     score: float
     components: dict[str, float]
+    unclipped_z_scores: dict[str, float] | None = None
+    unclipped_score: float | None = None

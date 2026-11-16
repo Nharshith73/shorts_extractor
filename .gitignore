@@ -7,3 +7,4 @@ data/segments/*
 !data/segments/.gitkeep
 data/soak-test/
 data/candidates/
+data/vod-benchmark/

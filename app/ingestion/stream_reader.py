@@ -71,6 +71,8 @@ def load_config(config_path: Path, source_override: str | None = None) -> Stream
         "is_live",
         "detection",
         "candidates",
+        "vod",
+        "selection",
     }
     unknown_keys = set(raw) - allowed_keys
     if unknown_keys:

@@ -2,7 +2,7 @@
 
 **Turn livestream highlights into engaging vertical Shorts—locally, with zero paid LLM API calls.**
 
-> **Status:** Planning / pre-implementation. This README describes the intended architecture and milestones; the application is not yet implemented.
+> **Status:** Stages 1–3 and offline VOD mode are implemented. Later AI judging, vertical editing, dashboard, and publishing stages remain planned.
 
 StreamClip AI is a proposed Python-first pipeline for monitoring gameplay livestreams (initially GTA 6), finding exciting moments, evaluating candidate clips with a **local vision-language model**, and automatically editing selected moments into vertical videos for YouTube Shorts, Instagram Reels, and TikTok.
 
@@ -318,7 +318,9 @@ python -m app.clips --config config.yaml
 python -m app.clips --config config.yaml --once
 ```
 
-Settings live under `candidates:`. Defaults are 15 seconds of pre-roll, 10 seconds of post-roll, 20–60 second clips, a 3 second merge gap, a 0.5 second live-edge grace period, and a 180 second wait timeout. `output_dir` defaults to `data/candidates`, relative to the config file. The final cut is re-encoded using `libx264 -preset veryfast -crf 18` and AAC, with `+faststart`; `video_encoder: h264_nvenc` selects NVIDIA encoding with preset p4 and CQ 18 when supported by the installed FFmpeg/GPU.
+Settings live under `candidates:`. Defaults are 15 seconds of pre-roll, 10 seconds of post-roll, 20–60 second clips, a 3 second merge gap, a 0.5 second live-edge grace period, and a 180 second wait timeout. `output_dir` defaults to `data/candidates`, relative to the config file. MP4/VOD cuts use input-side accurate seeking (`-ss` before `-i`) and re-encoding, AAC, and `+faststart`. Transport streams (`.ts`, `.mts`, `.m2ts`, `.mpegts`) retain output-side seeking because unindexed TS seeks can skip required video keyframes; buffered joins are short.
+
+The shipped config uses `candidates.encoder: auto`. Before its first export, each worker/VOD run tries a real one-second `h264_nvenc` encode at the source resolution. Auto selects NVENC only when the encode succeeds and produces frames; an encoder appearing in `ffmpeg -encoders` is insufficient. A failed probe logs the FFmpeg cause (including driver/API incompatibilities) and falls back to `libx264 -preset veryfast -crf 18`. The decision is cached for that worker/run. Explicit `encoder: libx264` skips the probe; explicit `encoder: h264_nvenc` requires usable NVIDIA encoding with preset p4 and CQ 18 and fails if it is unavailable. The older `video_encoder` key remains supported, but conflicting values for both keys are rejected.
 
 Windows start before the earlier of the region start and peak, and end after the region end. Long windows are limited to 60 seconds while retaining the peak and at least its configured pre-roll; short windows extend to 20 seconds. Windows from the same source/session merge when they overlap or are at most 3 seconds apart and the union is at most 60 seconds. Otherwise they remain separate. Merged windows use the highest-scoring event's peak when choosing the side of a discontinuity. Gap trimming may reduce the normal pre-roll; windows shorter than the minimum after trimming are `rejected_gap`.
 
@@ -331,6 +333,60 @@ Stage 3 unit and media tests run with the normal suite:
 ```powershell
 python -m pytest -v -rs
 ```
+
+## Running VOD mode
+
+VOD mode analyzes a downloaded local file without capture, real-time throttling, or the rolling buffer. One command writes raw features, ranked event peaks, clips and JSON sidecars, `review.csv`, and a static `index.html` with embedded video players.
+
+```powershell
+python -m app.vod run --video E:\test_footage\gameplay.mp4 --out data\vod-gameplay --config config.yaml
+python -m app.vod run --video E:\test_footage\gameplay.mp4 --chat E:\test_footage\chat.json --out data\vod-with-chat --config config.yaml
+```
+
+Open `<out>/index.html` in a browser to watch the shortlist. Clips are named `clip_<rank>_<HH-MM-SS>_<score>.mp4`. The fixed synthetic epoch (`1970-01-01T00:00:00Z` plus media seconds) preserves original-file offsets, including when an intro/outro is skipped:
+
+```powershell
+python -m app.vod run --video E:\test_footage\gameplay.mp4 --out data\vod-trimmed --start 00:02:00 --end 00:15:00
+```
+
+`vod.chunk_seconds` defaults to 300 seconds. Bounded FFmpeg audio/video reads carry unfinished one-second bins, audio filter state and previous-frame state across chunks. The existing bin-local spectral flux receives the complete bin even if it spans chunks. Final partial bins are retained. Progress includes percentage, elapsed time and real-time factor. `run.json` records audio/video decode and feature times, chat, scoring, selection and extraction, along with sampled peak RSS for Python plus child processes (100ms sampling). Decode timing measures blocked pipe reads, not CPU profiling; decoder work can overlap Python work. Detection speed has not been tuned here.
+
+`selection:` defaults to `clips_per_hour: 12`, `min_score: null`, and `min_separation_seconds: 30`. The budget is `ceil(clips_per_hour × analyzed hours)`, clamped to 3–40. Highest scores are selected with temporal separation after warmup, without requiring either threshold rule. A non-null min_score is the only score cutoff; short ranges, warmup, separation or a cutoff can leave fewer eligible clips. `events.json` contains the ranked shortlist and the original threshold events. Sidecars record `multi`, `single`, `multi+single` or `ranked_only`.
+
+Final clip windows may overlap by at most **2 seconds**, independent of the peak separation setting. Selection keeps the higher-ranked window and continues down the ranking to fill the budget. Ranking uses capped combined score first, then the uncapped weighted combined score to break ties, then timestamp. The existing feature z-score clipping stays at `[0, 10]`. Sidecars and `review.csv` also store `unclipped_z_scores` and `unclipped_score`: the signed median/MAD z-scores before clipping, with the same scale floors, and their weighted sum. Raw negative values are retained for diagnostics; only the tie-break score uses that uncapped sum. Rescore updates these fields and the overlap policy from saved raw features without decoding the source.
+
+VOD windows have independent defaults under `vod:`: pre-roll 8s, post-roll 6s, minimum 15s and maximum 45s. Pre-roll is strictly from the peak, never the earlier region edge. Minimum-length padding extends right only; if the file/trim end cannot accommodate it, that peak is skipped. Sidecars include actual pre/post offsets. Ranked clips remain independent rather than merging leftward and exceeding the peak pre-roll. Encoder settings still come from `candidates.encoder`; live ingestion/candidate window settings retain their behavior.
+
+Raw `features.csv` (including chat columns), `analysis.json` (source fingerprint, trim and decode parameters), and the window cache allow fast rescoring:
+
+```powershell
+python -m app.vod rescore --out data\vod-gameplay --config config.yaml
+python -m app.vod rescore --out data\vod-gameplay --config config.yaml --extract
+```
+
+Rescore does not decode media. Without `--extract`, it updates metadata/review pages and reuses existing clips; missing windows are shown as not extracted. `--extract` renders only uncached windows. Changing decode sample rate, video FPS or chat alignment requires a new `run`. Fresh extraction checks the source fingerprint; cached windows can be reused even with the source offline. Review decisions follow window IDs through rank/filename changes. `.clip-cache` retains validated exports, so ranked copies use extra disk space; older unlisted files remain.
+
+Optional chat comes from a [TwitchDownloader JSON export](https://github.com/lay295/TwitchDownloader). Configure it under `detection.chat` in `config.yaml`: weights, scale floors, and `time_offset_seconds`. The offset is **added** to every comment offset: use `-600` if the local file begins at VOD second 600. Verify alignment yourself; the tool cannot infer a trimmed video's original offset. Missing/invalid timestamps are skipped, unknown authors do not inflate distinct-chatter counts, and empty text has zero emote/caps ratios.
+
+Chat bins contain messages per second, distinct known authors, annotated/known emote tokens divided by total tokens, and uppercase letters divided by all alphabetic characters. Emote density is approximate. The same median/MAD baseline, warmup and clipping apply to chat. Zero chat weights disable those signals. With no chat file, underlying audio/video feature and threshold scoring calculations retain their behavior; VOD ranking additionally considers below-threshold peaks.
+
+Review paths and metadata in the terminal; it does not open or play media. Enter `y` to approve, `n` to reject, `s` to skip, or `q` to save and quit. Rejection requires a reason: `b` boring/nothing happens, `e` cut too early, `l` cut too late, `m` moment missing, `n` noise/audio artifact, or `o` other. Responses and reason_code are persisted; notes can be edited in the CSV.
+
+```powershell
+python -m app.vod review --out data\vod-gameplay
+python -m app.vod summary --out data\vod-gameplay
+```
+
+Summary reports approval rate among reviewed clips, unreviewed count, reasons breakdown and mean feature z-scores for approved versus rejected clips. Missing sidecars are counted and omitted from those averages.
+
+Weak-label CSVs contain `start_seconds,duration_seconds,weight` (for example VOD offsets, Twitch clip durations, and view counts). Evaluation ranks **event peaks**, accepts a hit within the label interval plus tolerance, and performs one-to-one matching. Precision divides by the number of available predictions up to K; view-weighted recall divides matched label weights by total label weight. These are weak proxies for editorial quality. The random baseline samples the same number of uniform timestamps across the full file, averaged over 200 trials with seed 42; it can also land in warmup time.
+
+```powershell
+python -m app.vod evaluate --out data\vod-gameplay --labels weak_labels.csv --tolerance 10 --top-k 10
+python -m pytest -v -rs
+```
+
+Media buffers are bounded by chunk_seconds; feature rows are retained for scoring. Chat JSON is still loaded as a whole, so large exports can dominate memory. Memory reports are sampled process-tree peaks, not exact allocation maxima. A ten-minute benchmark does not guarantee performance for other codecs, resolutions, hardware or clip counts. Below-threshold ranking deliberately favors a reviewable shortlist over guaranteed excitement.
 
 ## License
 

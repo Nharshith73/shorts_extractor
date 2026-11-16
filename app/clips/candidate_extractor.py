@@ -15,6 +15,7 @@ from app.ingestion.stream_reader import probe_duration
 from .config import CandidateConfig
 from .store import Candidate, CandidateStore
 from .windows import Window, availability, event_window, merge_windows, trim_gaps
+from .render import EncoderSelector, render_cut
 
 LOGGER = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ class CandidateExtractor:
         self.store = CandidateStore(self.buffer.manifest.database_path)
         self.ffmpeg = ffmpeg_binary
         self.ffprobe = ffprobe_binary
+        self.encoder_selector = EncoderSelector(config.requested_encoder, ffmpeg_binary)
         config.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _trim(self, window: Window, records: Sequence[SegmentRecord]) -> Window:
@@ -129,12 +131,7 @@ class CandidateExtractor:
                                     source_id=window.primary.source_id, session_id=window.primary.session_id)
             offset = (window.start - records[0].wall_start_utc).total_seconds()
             duration = (window.end - window.start).total_seconds()
-            codec = ["-c:v", self.config.video_encoder]
-            codec += ["-preset", "veryfast", "-crf", "18"] if self.config.video_encoder == "libx264" else ["-preset", "p4", "-cq", "18"]
-            subprocess.run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(joined),
-                            "-ss", f"{offset:.6f}", "-t", f"{duration:.6f}", "-map", "0:v:0", "-map", "0:a:0?",
-                            *codec, "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", str(rendered)],
-                           check=True, capture_output=True, timeout=300)
+            render_cut(joined, rendered, offset, duration, encoder_selector=self.encoder_selector, ffmpeg_binary=self.ffmpeg)
             actual = probe_duration(rendered, self.ffprobe)
             if abs(actual - duration) > 0.15:
                 raise ValueError(f"export duration {actual:.3f}s differs from requested {duration:.3f}s")

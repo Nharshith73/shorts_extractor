@@ -19,6 +19,12 @@ class CandidateConfig:
     poll_seconds: float = 2
     output_dir: Path = Path("data/candidates")
     video_encoder: str = "libx264"
+    encoder: str | None = None
+
+    @property
+    def requested_encoder(self) -> str:
+        """Canonical selection, retaining the older video_encoder setting."""
+        return self.encoder if self.encoder is not None else self.video_encoder
 
     def validate(self) -> None:
         values = (self.pre_roll_seconds, self.post_roll_seconds, self.min_seconds,
@@ -30,8 +36,8 @@ class CandidateConfig:
             raise ValueError("require 0 < min_seconds <= max_seconds and pre_roll_seconds < max_seconds")
         if self.wait_timeout_seconds <= 0 or self.poll_seconds <= 0:
             raise ValueError("candidate timeout and polling interval must be positive")
-        if self.video_encoder not in ("libx264", "h264_nvenc"):
-            raise ValueError("video_encoder must be libx264 or h264_nvenc")
+        if self.requested_encoder not in ("auto", "libx264", "h264_nvenc"):
+            raise ValueError("encoder must be auto, libx264, or h264_nvenc")
 
 
 def load_config(path: Path) -> tuple[CandidateConfig, Path, float]:
@@ -44,7 +50,9 @@ def load_config(path: Path) -> tuple[CandidateConfig, Path, float]:
     unknown = set(section) - set(CandidateConfig.__dataclass_fields__)
     if unknown:
         raise ValueError(f"unknown candidates keys: {sorted(unknown)}")
-    values = {key: (value if key in ("output_dir", "video_encoder") else float(value))
+    if "encoder" in section and "video_encoder" in section and section["encoder"] != section["video_encoder"]:
+        raise ValueError("set candidates.encoder or video_encoder, not conflicting values for both")
+    values = {key: (value if key in ("output_dir", "video_encoder", "encoder") else float(value))
               for key, value in section.items()}
     output = Path(values.get("output_dir", "data/candidates"))
     values["output_dir"] = output if output.is_absolute() else path.parent / output
