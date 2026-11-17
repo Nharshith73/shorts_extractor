@@ -1,34 +1,34 @@
 # StreamClip AI — Current YouTube Source Diagnostic Report
 
-**Report Date**: 2026-11-17  
+**Report Date**: 2026-11-18  
 **System**: StreamClip AI (Live Production Subsystem)  
-**Target Watch URL**: `https://www.youtube.com/watch?v=fvKv0L8aUJs`  
+**Target Watch URL**: `https://www.youtube.com/watch?v=lu613MYEzzY`  
 
 ---
 
 ## 1. Executive Summary
 
-The production test source has been updated to YouTube livestream URL `https://www.youtube.com/watch?v=fvKv0L8aUJs`.  
-All historical references in [source.yaml](file:///d:/clipsgta/shorts_extractor/source.yaml) and operational guides have been updated to point to this active stream.
+The production test source has been updated to YouTube livestream URL `https://www.youtube.com/watch?v=lu613MYEzzY`.  
+All references in [source.yaml](file:///d:/clipsgta/shorts_extractor/source.yaml) and operational guides reference this active stream.
 
-A live probe via official Google YouTube Data API v3 confirms that the broadcast is **CURRENTLY LIVE** and the live chat room is **ACTIVE** with messages actively arriving. However, raw media ingestion into FFmpeg remains **BLOCKED** pending the provision of an authorized direct creator feed via `STREAMCLIP_LIVE_INPUT`.
+A live probe via official Google YouTube Data API v3 confirms that the broadcast is **CURRENTLY LIVE** and the live chat room is **ACTIVE** with messages actively streaming. However, raw video media ingestion into FFmpeg remains **BLOCKED** pending the provision of an authorized direct creator feed via `STREAMCLIP_LIVE_INPUT`.
 
 ---
 
 ## 2. Source Identification & Video Metadata
 
 Retrieved via official endpoint:  
-`https://www.googleapis.com/youtube/v3/videos?part=snippet,status,liveStreamingDetails&id=fvKv0L8aUJs`  
+`https://www.googleapis.com/youtube/v3/videos?part=snippet,status,liveStreamingDetails&id=lu613MYEzzY`  
 Authenticated securely using `X-Goog-Api-Key` HTTP header.
 
 | Dimension | Value | Operational Context |
 | :--- | :--- | :--- |
-| **Video ID** | `fvKv0L8aUJs` | Correct active target video ID |
-| **Video Title** | `GTA 6 TOMORROW🌴ANKIT BAIYANPURIA vs RACHITROO 🌴RACKATHON 2 🌴 DAY 3🌴 BIG VILLA 🌴` | Live gaming broadcast |
-| **Channel Title** | `Rachitroo` | Live broadcast host |
-| **Channel ID** | `UCsM3qWjsbJr5Kt7_Q1ulLjg` | Verified creator channel |
+| **Video ID** | `lu613MYEzzY` | Active target video ID |
+| **Video Title** | `GTA 6 TOMORROW🌴🌴RACKATHON 2 🌴 DAY 3🌴 BIG VILLA 🌴` | Live gaming broadcast |
+| **Channel Title** | `Rachitroo` | Live broadcast creator |
+| **Channel ID** | `UCsM3qWjsbJr5Kt7_Q1ulLjg` | Verified channel identifier |
 | **Upload Status** | `uploaded` | Active live stream upload |
-| **Privacy Status** | `public` | Public broadcast |
+| **Privacy Status** | `public` | Publicly accessible broadcast |
 | **Live Broadcast Content** | `live` | Currently active live stream |
 
 ---
@@ -38,10 +38,10 @@ Authenticated securely using `X-Goog-Api-Key` HTTP header.
 | Lifecycle Field | Value | Notes |
 | :--- | :--- | :--- |
 | **Broadcast Status** | **`LIVE`** | Stream is actively transmitting |
-| **is_live** | `True` | Live flag asserted by YouTube API |
-| **Scheduled Start Time** | `2026-11-17T06:41:22Z` | Scheduled start |
-| **Actual Start Time** | `2026-11-17T06:47:30Z` | Stream commenced |
-| **Actual End Time** | `None` | Ongoing live stream (not completed) |
+| **is_live** | `True` | Live assertion verified |
+| **Scheduled Start Time** | `2026-11-17T17:52:39Z` | Scheduled start |
+| **Actual Start Time** | `2026-11-17T18:42:53Z` | Commenced live broadcast |
+| **Actual End Time** | `None` | Ongoing live stream |
 
 ---
 
@@ -50,11 +50,11 @@ Authenticated securely using `X-Goog-Api-Key` HTTP header.
 | Chat Field | Value | Notes |
 | :--- | :--- | :--- |
 | **Chat Availability** | **`ACTIVE`** | Live chat room is open and operational |
-| **Active Live Chat ID** | `Cg0KC2Z2S3YwTDhhVUpzKicKGFVDc00zcVdqc2JKcjVLdDdfUTF1bExqZxILZnZLdjBMOGFVSnM` | Direct chat container ID |
+| **Active Live Chat ID** | `Cg0KC2x1NjEzTVlFenpZKicKGFVDc00zcVdqc2JKcjVLdDdfUTF1bExqZxILbHU2MTNNWUV6elk` | Live chat room ID |
 | **API Endpoint** | `https://www.googleapis.com/youtube/v3/liveChat/messages` | Official live chat endpoint |
 | **Authentication** | `ACTIVE (Public-Data API via X-Goog-Api-Key)` | Fully authenticated |
-| **Poll Rate Recommendation** | `~3.0 seconds` (`pollingIntervalMillis: 3031`) | Optimal polling window |
-| **Live Message Capture** | **Verified Functional** | Tested and received incoming live chat batch |
+| **Poll Rate Recommendation** | `~2.0 seconds` (`pollingIntervalMillis: 2029`) | Recommended poll window |
+| **Live Message Capture** | **Verified Functional** | HTTP 200 with 10 messages returned per poll |
 
 ---
 
