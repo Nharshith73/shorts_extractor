@@ -1,0 +1,25 @@
+# Dedicated rendering config: capture keeps using config.yaml unchanged.
+render:
+  whisper_model: 'E:\models\faster-whisper-small'
+  compute_type: int8
+  device: cpu
+  language: auto
+  min_avg_logprob: -1.0
+  max_no_speech_prob: 0.6
+  captions_enabled: true
+  caption_style: bold_yellow  # bold_yellow | clean_white | boxed
+  uppercase: true
+  max_words: 3
+  font_size: 80
+  margin_horizontal: 80
+  margin_bottom: 400
+  outline: 4
+  shadow: 2
+  fonts_dir: assets/fonts
+  layout: blurred_background  # blurred_background | stacked | center_crop
+  facecam_region: null        # {x: 0, y: 0, w: 320, h: 240} in original source pixels
+  crop_center_x: 0.5
+  target_lufs: -14
+  encoder: auto
+  crf: 18
+  preset: medium
