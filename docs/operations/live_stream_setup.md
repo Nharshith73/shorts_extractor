@@ -21,7 +21,7 @@ source:
   id: primary_creator
   creator_name: authorized_creator
   platform: youtube
-  watch_url: https://www.youtube.com/watch?v=Opnkl7GVQEc
+  watch_url: https://www.youtube.com/watch?v=fvKv0L8aUJs
 
   authorization:
     permitted: true
