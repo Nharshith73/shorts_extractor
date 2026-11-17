@@ -4,8 +4,16 @@ render:
   compute_type: int8
   device: cpu
   language: auto
-  min_avg_logprob: -1.0
-  max_no_speech_prob: 0.6
+  min_avg_logprob: -1.5
+  max_no_speech_prob: 0.85
+  vad_filter: false
+  reaction_fallback: true
+  reaction_tag: '[HYPE]'
+  reaction_min_db: -28
+  reaction_contrast_db: 6
+  reaction_voice_ratio: 0.35
+  streamer: null
+  credit_enabled: true
   captions_enabled: true
   caption_style: bold_yellow  # bold_yellow | clean_white | boxed
   uppercase: true

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import math
 
 from app.clips.config import CandidateConfig
+from app.clips.duration import peak_bounds
 from app.detection.config import DetectionConfig
 from app.detection.models import DetectedEvent, ScoredBin
 from .settings import SelectionConfig
@@ -17,12 +18,13 @@ def rule_name(item: ScoredBin, config: DetectionConfig) -> str:
 
 
 def peak_window(event: DetectedEvent, config: CandidateConfig, start: float, end: float) -> tuple[float, float] | None:
-    """Never extend left beyond peak-pre; extend right for minimum duration."""
+    """Preserve lead-in/reaction; shift at media edges instead of losing context."""
     peak = media_seconds(event.peak_wall_utc)
     left = max(start, peak - config.pre_roll_seconds)
-    right = min(end, max(peak + config.post_roll_seconds,
+    right = max(peak + config.post_roll_seconds,
                          media_seconds(event.end_wall_utc) + config.post_roll_seconds,
-                         left + config.min_seconds), left + config.max_seconds)
+                         left + config.min_seconds)
+    left, right = peak_bounds(left, right, peak, maximum=config.duration_limit, lower=start, upper=end)
     if not left <= peak < right or right - left < config.min_seconds - 1e-6:
         return None
     return left, right
@@ -30,19 +32,26 @@ def peak_window(event: DetectedEvent, config: CandidateConfig, start: float, end
 
 def rank_peaks(scored: list[ScoredBin], selection: SelectionConfig, detection: DetectionConfig,
                windows: CandidateConfig, start: float, end: float) -> list[tuple[DetectedEvent, str]]:
-    budget = max(3, min(40, math.ceil(selection.clips_per_hour * (end - start) / 3600)))
+    budget = selection.top_k or max(3, min(40, math.ceil(selection.clips_per_hour * (end - start) / 3600)))
     selected: list[tuple[DetectedEvent, str]] = []
     accepted_windows: list[tuple[float, float]] = []
     for item in sorted(scored, key=lambda item: (
-        -item.score, -(item.unclipped_score if item.unclipped_score is not None else item.score), item.feature.wall_utc)):
+        -(item.ranking_score if item.ranking_score is not None else item.score),
+        -(item.unclipped_score if item.unclipped_score is not None else item.score), item.feature.wall_utc)):
         at = media_seconds(item.feature.wall_utc)
         if at - start < detection.warmup_seconds:
             continue
-        if selection.min_score is not None and item.score < selection.min_score:
+        if item.eligible is False:
+            continue
+        if item.eligible is None and max((value for name, value in item.z_scores.items()
+                                         if name.startswith("chat_") or name in ("audio_rms_db", "voice_energy_db", "onset_strength")), default=0) < detection.evidence_z_threshold:
+            continue
+        if selection.min_score is not None and (item.ranking_score if item.ranking_score is not None else item.score) < selection.min_score:
             continue
         event = DetectedEvent(item.feature.source_id, item.feature.session_id, item.feature.wall_utc,
-                              item.feature.wall_utc, media_time(at + item.feature.bin_seconds), item.score, item.z_scores,
-                              item.unclipped_z_scores, item.unclipped_score)
+                              item.feature.wall_utc, media_time(at + item.feature.bin_seconds),
+                              item.ranking_score if item.ranking_score is not None else item.score, item.z_scores,
+                              item.unclipped_z_scores, item.unclipped_score, item.reason_codes, item.ranking_components)
         bounds = peak_window(event, windows, start, end)
         if bounds is None:
             continue

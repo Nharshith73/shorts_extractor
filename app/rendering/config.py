@@ -23,8 +23,16 @@ class RenderConfig:
     compute_type: str = "int8"
     device: str = "cpu"
     language: str = "auto"
-    min_avg_logprob: float = -1.0
-    max_no_speech_prob: float = 0.6
+    min_avg_logprob: float = -1.5
+    max_no_speech_prob: float = 0.85
+    vad_filter: bool = False
+    reaction_fallback: bool = True
+    reaction_tag: str = "[HYPE]"
+    reaction_min_db: float = -28
+    reaction_contrast_db: float = 6
+    reaction_voice_ratio: float = 0.35
+    streamer: str | None = None
+    credit_enabled: bool = True
     captions_enabled: bool = True
     caption_style: str = "bold_yellow"
     uppercase: bool = True
@@ -56,6 +64,14 @@ class RenderConfig:
             raise ValueError("render.encoder must be auto, libx264, or h264_nvenc")
         if not isinstance(self.captions_enabled, bool) or not isinstance(self.uppercase, bool):
             raise ValueError("caption toggles must be YAML booleans")
+        if any(not isinstance(value, bool) for value in (self.vad_filter, self.reaction_fallback, self.credit_enabled)):
+            raise ValueError("VAD, reaction and credit toggles must be YAML booleans")
+        if self.streamer is not None and (not isinstance(self.streamer, str) or len(self.streamer) > 120):
+            raise ValueError("render.streamer must be a name/handle or null")
+        if not isinstance(self.reaction_tag, str) or not self.reaction_tag or len(self.reaction_tag) > 40 or len(self.reaction_tag.split()) > 3:
+            raise ValueError("reaction_tag must contain 1..40 characters")
+        if not -100 <= self.reaction_min_db <= 0 or not 0 < self.reaction_contrast_db <= 60 or not 0 < self.reaction_voice_ratio <= 1:
+            raise ValueError("invalid reaction energy/contrast/voice thresholds")
         for value in (self.max_words, self.font_size, self.margin_horizontal, self.margin_bottom, self.crf):
             if type(value) is not int:
                 raise ValueError("word count, font/margin sizes and crf must be integers")

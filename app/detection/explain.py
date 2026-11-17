@@ -84,7 +84,9 @@ def explain_window(
     reasons: list[str] = []
     has_signal = any(any(rules(item, config)) for item in window)
     qualified = [item for item in window if item.qualifies]
-    if not has_signal:
+    if any("visual_only_penalized" in item.reason_codes for item in window) and not any(item.eligible for item in window):
+        reasons.append("visual_only_penalized: no accompanying audio/vocal or chat evidence")
+    if not has_signal and not qualified:
         max_count = max(sum(z >= config.z_threshold for z in item.z_scores.values()) for item in window)
         reasons.append("only one feature above" if max_count == 1 else "below z_threshold")
     if (all((item.feature.wall_utc - session_start).total_seconds() < config.warmup_seconds for item in window)
@@ -94,7 +96,7 @@ def explain_window(
         ))):
         reasons.append("warmup")
     floor_suppressed = any(
-        any(rules(raw, config)) and not any(rules(current, config))
+        any(rules(raw, config)) and not any(rules(current, config)) and not current.qualifies
         and (current.feature.wall_utc - session_start).total_seconds() >= config.warmup_seconds
         for current, raw in zip(window, unfiltered_window)
     )

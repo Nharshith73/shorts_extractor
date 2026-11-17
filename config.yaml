@@ -23,6 +23,17 @@ detection:
     motion: 1.0
     cut_change: 1.0
   relative_scale_floor: 0.01
+  evidence_z_threshold: 2.0
+  contrast_seconds: 5
+  contrast_scale_db: 2
+  visual_only_penalty: 0.1
+  ranking_weights:
+    vocal_spike: 2.5
+    audio_contrast: 1.5
+    audio_spike: 0.5
+    onset_spike: 0.5
+    chat_surge: 2.0
+    visual_activity: 0.25
   scale_floors:
     audio_rms_db: 0.5
     voice_energy_db: 0.5
@@ -44,9 +55,9 @@ detection:
       chat_caps_ratio: 0.05
 
 candidates:
-  pre_roll_seconds: 15
-  post_roll_seconds: 10
-  min_seconds: 20
+  pre_roll_seconds: 25
+  post_roll_seconds: 20
+  min_seconds: 30
   max_seconds: 60
   merge_gap_seconds: 3
   grace_seconds: 0.5
@@ -54,17 +65,21 @@ candidates:
   poll_seconds: 2
   output_dir: data/candidates
   encoder: auto
+  top_k: null
+  clips_per_hour: 12
+  min_separation_seconds: 30
 
 # VOD-only defaults; live candidate settings above keep their current behavior.
 vod:
   chunk_seconds: 300
   progress_seconds: 15
-  pre_roll_seconds: 8
-  post_roll_seconds: 6
-  min_seconds: 15
-  max_seconds: 45
+  pre_roll_seconds: 25
+  post_roll_seconds: 20
+  min_seconds: 30
+  max_seconds: 60
 
 selection:
   clips_per_hour: 12
   min_score: null
   min_separation_seconds: 30
+  top_k: null

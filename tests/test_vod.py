@@ -64,11 +64,11 @@ def test_time_model_and_bounded_window_planning() -> None:
         return DetectedEvent("vod", "vod", media_time(second), media_time(second), media_time(second + 1), 10, {"motion": 10})
     windows = plan_windows([event(80), event(90)], config, 180)
     assert len(windows) == 1
-    assert media_seconds(windows[0].start) == 65
-    assert media_seconds(windows[0].end) == 101
+    assert media_seconds(windows[0].start) == 55
+    assert media_seconds(windows[0].end) == 111
     at_end = plan_windows([event(179)], config, 180)[0]
     assert media_seconds(at_end.end) == 180
-    assert 20 <= (at_end.end - at_end.start).total_seconds() <= 60
+    assert 30 <= (at_end.end - at_end.start).total_seconds() <= 60
     assert not plan_windows([event(5)], config, 10)
 
 

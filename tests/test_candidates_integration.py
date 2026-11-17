@@ -92,7 +92,8 @@ def test_known_event_exports_have_accurate_duration_and_content(captured: tuple[
         expected_duration = (candidate.window.end - candidate.window.start).total_seconds()
         assert abs(probe_duration(output) - expected_duration) < 0.15
         start_offset = (candidate.window.start - origin).total_seconds()
-        for offset in (2.0, 15.5, 22.0):
+        assert 30 <= expected_duration <= 60
+        for offset in (2.0, 25.5, 32.0):
             assert np.mean(abs(frame(source, start_offset + offset) - frame(output, offset))) < 8
             assert abs(frequency(source, start_offset + offset) - frequency(output, offset)) < 5
         assert json.loads(output.with_suffix(".json").read_text())["events"][0]["score"] == 20
@@ -106,7 +107,8 @@ def test_ingestion_detection_extraction_contains_event_at_pre_roll(captured: tup
     clone_segments(original, segments)
     runner = DetectionRunner(segments / "manifest.sqlite3", DetectionConfig(baseline_seconds=30, warmup_seconds=30))
     runner.run_once()
-    worker = CandidateExtractor(segments, CandidateConfig(output_dir=tmp_path / "out"))
+    worker = CandidateExtractor(segments, CandidateConfig(output_dir=tmp_path / "out", pre_roll_seconds=15,
+                                                        post_roll_seconds=10, min_seconds=20, max_seconds=30))
     candidates = worker.run_once()
     for expected in (80, 140):
         origin = worker.buffer.manifest.all_records(source_id)[0].wall_start_utc

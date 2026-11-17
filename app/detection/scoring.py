@@ -11,6 +11,7 @@ import numpy as np
 from .config import DetectionConfig
 from .features import FEATURE_NAMES
 from .models import DetectedEvent, FeatureBin, ScoredBin
+from .ranking import ranking_signals
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,20 +97,19 @@ def score_feature_bins(features: Sequence[FeatureBin], config: DetectionConfig,
                     component = float(np.clip(component, 0.0, 10.0))
                 z_scores[name] = component
                 score += weight * z_scores[name]
-        above_threshold = sum(z_score >= config.z_threshold for z_score in z_scores.values())
-        qualifying_signal = (
-            above_threshold >= 2
-            or max(z_scores.values(), default=0.0) >= config.single_feature_threshold
-        )
         elapsed = (feature.wall_utc - session_start).total_seconds()
+        ranking_score, ranking_components, reasons, eligible = ranking_signals(feature, prior, z_scores, config,
+            auxiliary.values.get(feature.wall_utc) if auxiliary is not None else None,
+            auxiliary.weights if auxiliary is not None else None)
         scored.append(
             ScoredBin(
                 feature=feature,
                 z_scores=z_scores,
                 score=float(score),
-                qualifies=elapsed >= config.warmup_seconds and qualifying_signal,
+                qualifies=elapsed >= config.warmup_seconds and eligible,
                 unclipped_z_scores=unclipped,
                 unclipped_score=unclipped_score,
+                ranking_score=ranking_score, reason_codes=reasons, ranking_components=ranking_components, eligible=eligible,
             )
         )
     return scored
@@ -139,7 +139,8 @@ def pick_events(scored: Sequence[ScoredBin], config: DetectionConfig) -> list[De
     """Convert qualifying regions into separated, highest-score events."""
     candidates: list[DetectedEvent] = []
     for region in _regions(scored):
-        peak = max(region, key=lambda item: (item.score, -item.feature.wall_utc.timestamp()))
+        peak = max(region, key=lambda item: (item.ranking_score if item.ranking_score is not None else item.score,
+                                            item.unclipped_score or 0, -item.feature.wall_utc.timestamp()))
         candidates.append(
             DetectedEvent(
                 source_id=peak.feature.source_id,
@@ -148,10 +149,11 @@ def pick_events(scored: Sequence[ScoredBin], config: DetectionConfig) -> list[De
                 start_wall_utc=region[0].feature.wall_utc,
                 end_wall_utc=region[-1].feature.wall_utc
                 + timedelta(seconds=region[-1].feature.bin_seconds),
-                score=peak.score,
+                score=peak.ranking_score if peak.ranking_score is not None else peak.score,
                 components=peak.z_scores,
                 unclipped_z_scores=peak.unclipped_z_scores,
                 unclipped_score=peak.unclipped_score,
+                reason_codes=peak.reason_codes, ranking_components=peak.ranking_components,
             )
         )
     selected: list[DetectedEvent] = []

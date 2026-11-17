@@ -8,11 +8,14 @@ import json
 import logging
 from pathlib import Path
 import shutil
+import subprocess
 import time
 
 from app.clips.candidate_extractor import worker_lock
 from app.clips.config import CandidateConfig
 from app.clips.render import EncoderSelector, render_cut
+from app.clips.duration import guard_duration
+from app.media_identity import source_streamer, streamer_name
 from app.clips.windows import Event, Window, event_window, merge_windows
 from app.detection.config import load_detection_config
 from app.detection.models import DetectedEvent, FeatureBin
@@ -23,7 +26,7 @@ from .chat import load_chat, load_chat_config
 from .chunked import extract_chunked
 from .memory import PeakMemory
 from .selection import peak_window, rank_peaks
-from .settings import load_settings
+from .settings import load_settings, override_selection
 from .timeline import EPOCH, media_seconds, media_time
 
 LOGGER = logging.getLogger(__name__)
@@ -34,7 +37,8 @@ def event_data(event: DetectedEvent, event_id: int) -> dict[str, object]:
                 peak_time_seconds=media_seconds(event.peak_wall_utc),
                 start_time_seconds=media_seconds(event.start_wall_utc),
                 end_time_seconds=media_seconds(event.end_wall_utc), score=event.score, components=event.components,
-                unclipped_z_scores=event.unclipped_z_scores, unclipped_score=event.unclipped_score)
+                unclipped_z_scores=event.unclipped_z_scores, unclipped_score=event.unclipped_score,
+                reason_codes=event.reason_codes, ranking_components=event.ranking_components)
 
 
 def plan_windows(events: list[DetectedEvent], config: CandidateConfig, duration: float) -> list[Window]:
@@ -82,8 +86,12 @@ def _produce(output: Path, config_path: Path, analysis: dict, features: list[Fea
              auxiliary: AuxiliaryFeatures | None, extract: bool, timings: dict[str, float]) -> tuple[list[dict], int, str | None]:
     detection = load_detection_config(config_path)
     vod, selection, windows = load_settings(config_path)
+    selection = override_selection(selection, **analysis.get("selection_overrides", {}))
     at = time.perf_counter()
     scored = score_feature_bins(features, detection, auxiliary, include_unclipped=True)
+    write_json(output / "selection_diagnostics.json", [dict(time_seconds=media_seconds(item.feature.wall_utc),
+        base_score=item.score, ranking_score=item.ranking_score, eligible=item.eligible,
+        reason_codes=item.reason_codes, ranking_components=item.ranking_components) for item in scored])
     threshold_events = pick_events(scored, detection)
     timings["scoring_seconds"] = time.perf_counter() - at
     at = time.perf_counter()
@@ -115,6 +123,11 @@ def _produce(output: Path, config_path: Path, analysis: dict, features: list[Fea
         cached = cache.get(key, {})
         old_file = Path(cached.get("clip_path", "."))
         reused = old_file.is_file() and old_file.stat().st_size == cached.get("size_bytes")
+        if reused:
+            try:
+                guard_duration(probe_duration(old_file), right-left)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                reused = False
         extracted = False
         encoder = cached.get("video_encoder") if reused else None
         if reused:
@@ -130,8 +143,7 @@ def _produce(output: Path, config_path: Path, analysis: dict, features: list[Fea
             try:
                 render_cut(Path(analysis["video"]), temporary, left, right - left, encoder_selector=selector)
                 actual = probe_duration(temporary)
-                if abs(actual - (right - left)) > 0.15:
-                    raise ValueError(f"clip duration {actual} differs from requested {right-left}")
+                guard_duration(actual, right-left)
                 temporary.replace(clip_path)
                 extracted, encoder = True, selector.selected
             finally:
@@ -141,6 +153,8 @@ def _produce(output: Path, config_path: Path, analysis: dict, features: list[Fea
                     actual_pre_roll_seconds=peak-left, actual_post_roll_seconds=right-peak,
                     score=event.score, components=event.components, rule=rule,
                     unclipped_z_scores=event.unclipped_z_scores, unclipped_score=event.unclipped_score,
+                    reason_codes=event.reason_codes, ranking_components=event.ranking_components,
+                    streamer=analysis.get("streamer"),
                     events=[event_data(event, rank)], video_encoder=encoder, extracted=extracted, reused=reused)
         write_json(clip_path.with_suffix(".json"), clip)
         if extracted:
@@ -156,7 +170,8 @@ def _produce(output: Path, config_path: Path, analysis: dict, features: list[Fea
             top_features=top, approved=old.get("approved", ""), notes=old.get("notes", ""), reason_code=old.get("reason_code", ""),
             window_id=key, rank=str(rank), peak_seconds=str(peak), rule=rule,
             unclipped_z_scores=json.dumps(event.unclipped_z_scores, sort_keys=True, allow_nan=False),
-            unclipped_score=str(event.unclipped_score)))
+            unclipped_score=str(event.unclipped_score), reason_codes=";".join(event.reason_codes)))
+        LOGGER.info("Rank %d peak=%.3fs score=%.3f reason_codes=%s", rank, peak, event.score, event.reason_codes)
         clips.append(clip)
         write_review(output / "review.csv", rows)
         write_json(output / "clip_cache.json", cache)
@@ -174,6 +189,7 @@ def _report(output: Path, analysis: dict, started: float, timings: dict[str, flo
     result = RunResult(duration, time.perf_counter() - started, detection_seconds, len(clips), sum(clip["extracted"] for clip in clips))
     dominant = max(timings, key=timings.get) if timings else "none"
     vod, selection, candidates = load_settings(config_path)
+    selection = override_selection(selection, **analysis.get("selection_overrides", {}))
     write_json(output / "run.json", dict(**analysis, **asdict(result), stage_timings=timings,
         dominant_stage=dominant, peak_memory_bytes=memory.peak_bytes,
         memory_measurement="peak sampled parent + child RSS, 100ms interval",
@@ -189,7 +205,8 @@ def _report(output: Path, analysis: dict, started: float, timings: dict[str, flo
 
 
 def run(video: Path, output: Path, config_path: Path, chat: Path | None = None,
-        start: float = 0, end: float | None = None) -> RunResult:
+        start: float = 0, end: float | None = None, *, top_k: int | None = None,
+        clips_per_hour: float | None = None, streamer: str | None = None) -> RunResult:
     video, output = video.resolve(), output.resolve()
     if not video.is_file():
         raise FileNotFoundError(video)
@@ -197,7 +214,8 @@ def run(video: Path, output: Path, config_path: Path, chat: Path | None = None,
     with worker_lock(output / ".vod.lock"), PeakMemory() as memory:
         started = time.perf_counter()
         config = load_detection_config(config_path)
-        vod, _, _ = load_settings(config_path)
+        vod, selection, _ = load_settings(config_path)
+        override_selection(selection, top_k, clips_per_hour)
         duration = probe_duration(video)
         end = duration if end is None else end
         if not 0 <= start < end <= duration + 1e-6:
@@ -205,26 +223,31 @@ def run(video: Path, output: Path, config_path: Path, chat: Path | None = None,
         source_id = hashlib.sha256(str(video).encode()).hexdigest()[:16]
         features, timings = extract_chunked(video, config, source_id, start, end, vod.chunk_seconds, vod.progress_seconds)
         at = time.perf_counter()
-        auxiliary = load_chat(chat, features, load_chat_config(config_path)) if chat else None
+        chat_metadata: dict = {}
+        auxiliary = load_chat(chat, features, load_chat_config(config_path), chat_metadata) if chat else None
         timings["chat_seconds"] = time.perf_counter() - at
         write_features(output / "features.csv", features, auxiliary)
         analysis = dict(video=str(video), source_id=source_id, fingerprint=_fingerprint(video), source_duration_seconds=duration,
                         start_seconds=start, end_seconds=end, chunk_seconds=vod.chunk_seconds,
                         sample_rate=config.sample_rate, video_fps=config.video_fps, feature_schema_version=1,
                         time_model="1970-01-01 UTC + original-file media seconds", chat=str(chat.resolve()) if chat else None,
-                        chat_time_offset_seconds=load_chat_config(config_path).time_offset_seconds if chat else None)
+                        chat_time_offset_seconds=load_chat_config(config_path).time_offset_seconds if chat else None,
+                        streamer=streamer_name(streamer) or chat_metadata.get("streamer") or source_streamer(video),
+                        selection_overrides=dict(top_k=top_k, clips_per_hour=clips_per_hour))
         write_json(output / "analysis.json", analysis)
         clips, threshold_count, encoder = _produce(output, config_path, analysis, features, auxiliary, True, timings)
         return _report(output, analysis, started, timings, memory, clips, threshold_count, encoder, config_path)
 
 
-def rescore(output: Path, config_path: Path, extract: bool = False) -> RunResult:
+def rescore(output: Path, config_path: Path, extract: bool = False, *, top_k: int | None = None,
+            clips_per_hour: float | None = None) -> RunResult:
     output = output.resolve()
     with worker_lock(output / ".vod.lock"), PeakMemory() as memory:
         started = time.perf_counter()
         analysis = _read_json(output / "analysis.json", None)
         if analysis is None:
             raise ValueError("analysis.json missing; run VOD analysis once to persist source metadata")
+        analysis["selection_overrides"] = dict(top_k=top_k, clips_per_hour=clips_per_hour)
         chat_config = load_chat_config(config_path)
         if analysis.get("chat") and chat_config.time_offset_seconds != analysis.get("chat_time_offset_seconds"):
             raise ValueError("chat offset changed; run analysis again to re-align raw chat bins")

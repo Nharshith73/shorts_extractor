@@ -48,14 +48,16 @@ def test_five_minute_vod_run_command_produces_reviewable_set(tmp_path: Path) -> 
     subprocess.run([sys.executable, "-m", "app.vod", "run", "--video", str(source), "--out", str(output),
                     "--config", str(config), "--start", "00:00:10", "--end", "00:04:50"], check=True, capture_output=True)
     clips = json.loads((output / "clips.json").read_text())
-    assert len(clips) == 3
+    # Two injected multimodal moments; the quota must not add a background filler.
+    assert len(clips) == 2
     for clip in clips:
         assert Path(clip["clip_path"]).name.startswith(f'clip_{clip["rank"]:02d}_')
         assert 10 <= clip["start_seconds"] < clip["end_seconds"] <= 290
-        assert clip["actual_pre_roll_seconds"] <= 8
+        assert clip["actual_pre_roll_seconds"] <= 25
+        assert 30 <= clip["end_seconds"] - clip["start_seconds"] <= 60
         assert probe_duration(Path(clip["clip_path"])) == pytest.approx(clip["end_seconds"] - clip["start_seconds"], abs=0.15)
     assert all(any(abs(clip["peak_seconds"] - expected) <= 3 for clip in clips) for expected in (80, 200))
     page = (output / "index.html").read_text()
-    assert page.count("<video") == 3
+    assert page.count("<video") == 2
     for name in ("features.csv", "events.json", "review.csv", "analysis.json", "run.json"):
         assert (output / name).is_file()

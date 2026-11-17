@@ -84,6 +84,10 @@ class DetectionStore:
                 ON events (source_id, session_id, peak_wall_utc)
                 """
             )
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(events)")}
+            for name, default in (("reason_codes_json", "[]"), ("ranking_components_json", "{}")):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE events ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS analysis_state (
@@ -210,6 +214,8 @@ class DetectionStore:
                 event.score,
                 json.dumps(event.components, sort_keys=True),
                 now,
+                json.dumps(event.reason_codes),
+                json.dumps(event.ranking_components or {}, sort_keys=True),
             )
             for event in events
         ]
@@ -222,8 +228,8 @@ class DetectionStore:
                 """
                 INSERT INTO events
                 (source_id, session_id, peak_wall_utc, start_wall_utc, end_wall_utc,
-                 score, components_json, created_utc)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 score, components_json, created_utc, reason_codes_json, ranking_components_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -246,6 +252,8 @@ class DetectionStore:
                 end_wall_utc=from_utc_text(str(row["end_wall_utc"])),
                 score=float(row["score"]),
                 components=json.loads(str(row["components_json"])),
+                reason_codes=tuple(json.loads(row["reason_codes_json"])),
+                ranking_components=json.loads(row["ranking_components_json"]),
             )
             for row in rows
         ]

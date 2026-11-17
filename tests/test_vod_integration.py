@@ -25,7 +25,11 @@ def test_vod_detects_injected_events_and_exports_accurate_clips(tmp_path: Path) 
     assert result.clip_count >= 2
     for clip in (output / "clips").glob("*.mp4"):
         metadata = json.loads(clip.with_suffix(".json").read_text())
+        assert 30 <= metadata["end_seconds"] - metadata["start_seconds"] <= 60
         assert abs(probe_duration(clip) - (metadata["end_seconds"] - metadata["start_seconds"])) <= 0.15
         assert metadata["components"]
-        assert metadata["score"] == pytest.approx(sum(metadata["components"].values()))
+        weights = dict(vocal_spike=2.5, audio_contrast=1.5, audio_spike=0.5,
+                       onset_spike=0.5, chat_surge=2.0, visual_activity=0.25)
+        assert metadata["score"] == pytest.approx(sum(weights[key]*value for key, value in metadata["ranking_components"].items()))
+        assert metadata["reason_codes"]
     assert not (output / "segments").exists()

@@ -14,8 +14,10 @@ from app.ingestion.rolling_buffer import RollingBuffer, SegmentRecord, to_utc_te
 from app.ingestion.stream_reader import probe_duration
 from .config import CandidateConfig
 from .store import Candidate, CandidateStore
-from .windows import Window, availability, event_window, merge_windows, trim_gaps
+from .windows import Window, availability, cap_window, event_window, merge_windows, trim_gaps
 from .render import EncoderSelector, render_cut
+from .duration import guard_duration
+from .selection import ranked_live_events, rejection_reason
 
 LOGGER = logging.getLogger(__name__)
 
@@ -71,13 +73,23 @@ class CandidateExtractor:
 
     def _trim(self, window: Window, records: Sequence[SegmentRecord]) -> Window:
         boundaries = self.buffer.get_discontinuities(window.start, window.end)
-        return trim_gaps(window, boundaries, records)
+        return trim_gaps(cap_window(window, self.config), boundaries, records)
 
     def run_once(self, now: datetime | None = None) -> list[Candidate]:
         current = now or utc_now()
         with worker_lock(self.buffer.segments_dir / ".candidates.lock"):
             records = self.buffer.manifest.all_records()
-            for window in merge_windows([event_window(event, self.config) for event in self.store.new_events()], self.config):
+            pending, existing_candidates = self.store.new_events(), self.store.all()
+            events = ranked_live_events(pending, existing_candidates, self.config, current)
+            selected_keys = {(event.source_id, event.peak) for event in events}
+            for event in pending:
+                if (event.source_id, event.peak) not in selected_keys:
+                    reason = rejection_reason(event, events, existing_candidates, self.config)
+                    self.store.record_selection_decision(event, reason, current)
+                    LOGGER.info("Live peak %s score=%.3f skipped: %s", event.peak, event.score, reason)
+            for event in events:
+                LOGGER.info("Live ranked peak %s score=%.3f reason_codes=%s", event.peak, event.score, event.reason_codes)
+            for window in merge_windows([event_window(event, self.config) for event in events], self.config):
                 for existing in self.store.all():
                     if existing.status != "waiting":
                         continue
@@ -119,6 +131,7 @@ class CandidateExtractor:
             self.store.update(candidate.id, "failed", window=window, error=str(exc))
 
     def _export(self, candidate_id: str, window: Window) -> Path:
+        window = cap_window(window, self.config)
         records = self.buffer.get_segments(window.start, window.end,
                                            source_id=window.primary.source_id, session_id=window.primary.session_id)
         if not records:
@@ -133,13 +146,16 @@ class CandidateExtractor:
             duration = (window.end - window.start).total_seconds()
             render_cut(joined, rendered, offset, duration, encoder_selector=self.encoder_selector, ffmpeg_binary=self.ffmpeg)
             actual = probe_duration(rendered, self.ffprobe)
-            if abs(actual - duration) > 0.15:
-                raise ValueError(f"export duration {actual:.3f}s differs from requested {duration:.3f}s")
+            guard_duration(actual, duration)
             metadata = dict(candidate_id=candidate_id, source_id=window.primary.source_id,
                             session_id=window.primary.session_id, start_wall_utc=to_utc_text(window.start),
                             end_wall_utc=to_utc_text(window.end), has_gap=window.has_gap,
                             segment_ids=[record.id for record in records],
                             events=json.loads(self.store._snapshot(window)), clip_path=str(output.resolve()))
+            metadata["reason_codes"] = list(window.primary.reason_codes)
+            metadata["covered_event_ids"] = [event.id for event in window.events if window.start <= event.peak < window.end]
+            metadata["suppressed_event_ids"] = [event.id for event in window.events if not window.start <= event.peak < window.end]
+            metadata["peak_wall_utc"] = to_utc_text(window.primary.peak)
             sidecar = Path(temporary) / "clip.json"
             sidecar.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
             rendered.replace(output)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import math
 
 import yaml
 
@@ -22,6 +23,8 @@ DEFAULT_SCALE_FLOORS = {
     "motion": 1.0,
     "cut_change": 0.01,
 }
+DEFAULT_RANKING_WEIGHTS = dict(vocal_spike=2.5, audio_contrast=1.5, audio_spike=0.5,
+                               onset_spike=0.5, chat_surge=2.0, visual_activity=0.25)
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +42,11 @@ class DetectionConfig:
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
     scale_floors: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_SCALE_FLOORS))
     relative_scale_floor: float = 0.01
+    ranking_weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_RANKING_WEIGHTS))
+    evidence_z_threshold: float = 2.0
+    contrast_seconds: float = 5.0
+    contrast_scale_db: float = 2.0
+    visual_only_penalty: float = 0.1
 
     def validate(self) -> None:
         if self.baseline_seconds <= 0:
@@ -64,6 +72,12 @@ class DetectionConfig:
             raise ValueError("detection scale floors must be positive")
         if self.relative_scale_floor < 0:
             raise ValueError("detection.relative_scale_floor cannot be negative")
+        if set(self.ranking_weights) != set(DEFAULT_RANKING_WEIGHTS) or any(not math.isfinite(value) or value < 0 for value in self.ranking_weights.values()):
+            raise ValueError("invalid detection.ranking_weights")
+        if any(not math.isfinite(value) or value <= 0 for value in (self.evidence_z_threshold, self.contrast_seconds, self.contrast_scale_db)):
+            raise ValueError("evidence and contrast settings must be finite and positive")
+        if not 0 <= self.visual_only_penalty <= 1:
+            raise ValueError("visual_only_penalty must be 0..1")
 
 
 def load_detection_config(config_path: Path) -> DetectionConfig:
@@ -88,6 +102,7 @@ def load_detection_config(config_path: Path) -> DetectionConfig:
         "scale_floors",
         "relative_scale_floor",
         "chat",
+        "ranking_weights", "evidence_z_threshold", "contrast_seconds", "contrast_scale_db", "visual_only_penalty",
     }
     unknown = set(section) - allowed
     if unknown:
@@ -104,6 +119,9 @@ def load_detection_config(config_path: Path) -> DetectionConfig:
     floors = dict(DEFAULT_SCALE_FLOORS)
     for name, value in configured_floors.items():
         floors[str(name)] = float(value)
+    ranking_weights = section.get("ranking_weights", {})
+    if not isinstance(ranking_weights, dict):
+        raise ValueError("detection.ranking_weights must be a mapping")
     config = DetectionConfig(
         baseline_seconds=float(section.get("baseline_seconds", 300)),
         warmup_seconds=float(section.get("warmup_seconds", 60)),
@@ -116,6 +134,11 @@ def load_detection_config(config_path: Path) -> DetectionConfig:
         weights=weights,
         scale_floors=floors,
         relative_scale_floor=float(section.get("relative_scale_floor", 0.01)),
+        ranking_weights={**DEFAULT_RANKING_WEIGHTS, **{str(name): float(value) for name, value in ranking_weights.items()}},
+        evidence_z_threshold=float(section.get("evidence_z_threshold", 2)),
+        contrast_seconds=float(section.get("contrast_seconds", 5)),
+        contrast_scale_db=float(section.get("contrast_scale_db", 2)),
+        visual_only_penalty=float(section.get("visual_only_penalty", 0.1)),
     )
     config.validate()
     return config

@@ -77,7 +77,7 @@ def evaluate(output: Path, labels_path: Path, tolerance: float, top_k: int) -> M
     labels = load_labels(labels_path)
     if any(label.start + label.duration > duration + 0.15 for label in labels):
         raise ValueError("weak labels extend beyond this VOD; check offset alignment")
-    ranked = sorted(data["events"], key=lambda event: (-event["score"], event["peak_time_seconds"]))[:top_k]
+    ranked = sorted(data["events"], key=lambda event: (-event["score"], -(event.get("unclipped_score") or 0), event["peak_time_seconds"]))[:top_k]
     result = metrics([event["peak_time_seconds"] for event in ranked], labels, tolerance)
     LOGGER.info("Event-peak evaluation: K=%d available=%d tolerance=%.3fs; one prediction per label", top_k, len(ranked), tolerance)
     LOGGER.info("Detector recall@K=%.4f precision@K=%.4f view-weighted recall=%.4f", result.recall_at_k, result.precision_at_k, result.weighted_recall)

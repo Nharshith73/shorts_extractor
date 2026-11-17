@@ -20,7 +20,7 @@ from app.vod.timeline import media_time, media_seconds
 
 def bin_at(second: float, score: float) -> ScoredBin:
     feature = FeatureBin("source", "vod", media_time(second), 1, -20, -30, 0, 0, 0)
-    return ScoredBin(feature, {"motion": score}, score, False)
+    return ScoredBin(feature, {"motion": score, "voice_energy_db": 2}, score, False)
 
 
 def test_chunk_state_preserves_partial_bins_filter_and_motion() -> None:
@@ -59,18 +59,26 @@ def test_vod_defaults_peak_window_and_original_time_trimming(tmp_path: Path) -> 
     config = tmp_path / "config.yaml"
     config.write_text("{}", encoding="utf-8")
     _, _, windows = load_settings(config)
-    assert (windows.pre_roll_seconds, windows.post_roll_seconds, windows.min_seconds, windows.max_seconds) == (8, 6, 15, 45)
+    assert (windows.pre_roll_seconds, windows.post_roll_seconds, windows.min_seconds, windows.max_seconds) == (25, 20, 30, 60)
     event = DetectedEvent("s", "vod", media_time(120), media_time(80), media_time(121), 5, {})
-    assert peak_window(event, windows, 100, 200) == (112, 127)
-    assert peak_window(event, windows, 118, 200) == (118, 133)
+    assert peak_window(event, windows, 100, 200) == (100, 141)
+    assert peak_window(event, windows, 118, 200) == (118, 148)
     assert peak_window(event, windows, 100, 122) is None
+    # The file end shifts the window left, preserving context instead of
+    # dropping the candidate or exporting a short reaction fragment.
+    near_end = replace(event, peak_wall_utc=media_time(195), end_wall_utc=media_time(196))
+    assert peak_window(near_end, windows, 0, 200) == (154, 200)
+    near_start = replace(event, peak_wall_utc=media_time(5), end_wall_utc=media_time(6))
+    assert peak_window(near_start, windows, 0, 200) == (0, 30)
+    assert peak_window(near_start, windows, 0, 29) is None
     assert parse_timestamp("01:02:03.5") == 3723.5
 
 
 def test_rescore_never_decodes_and_reuses_unchanged_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config = tmp_path / "config.yaml"
     config.write_text("detection:\n  warmup_seconds: 0\nselection:\n  min_separation_seconds: 20\n", encoding="utf-8")
-    features = [bin_at(second, 0).feature for second in range(180)]
+    features = [replace(bin_at(second, 0).feature, audio_rms_db=0, voice_energy_db=-2, motion=30)
+                if second in (40, 90, 140) else bin_at(second, 0).feature for second in range(180)]
     write_features(tmp_path / "features.csv", features, None)
     write_json(tmp_path / "analysis.json", dict(video=str(tmp_path / "unavailable.mp4"), source_id="s", fingerprint={},
         source_duration_seconds=180, start_seconds=0, end_seconds=180, chat=None))
@@ -78,6 +86,7 @@ def test_rescore_never_decodes_and_reuses_unchanged_windows(tmp_path: Path, monk
         raise AssertionError("rescore must not decode or render")
     monkeypatch.setattr("app.vod.pipeline.extract_chunked", forbidden)
     monkeypatch.setattr("app.vod.pipeline.render_cut", forbidden)
+    monkeypatch.setattr("app.vod.pipeline.probe_duration", lambda path: 46.0)
     rescore(tmp_path, config)
     clips = json.loads((tmp_path / "clips.json").read_text())
     assert len(clips) == 3 and not any(clip["extracted"] for clip in clips)

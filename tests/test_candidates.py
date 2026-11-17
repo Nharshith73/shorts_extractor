@@ -23,6 +23,11 @@ def event(peak: float, event_id: int = 1, session: str = "a") -> Event:
     return Event(event_id, "source", session, at(peak), at(peak), at(peak + 1), 10)
 
 
+def short_config(**overrides: object) -> CandidateConfig:
+    """Retain short-window fixtures for pin, recovery and retention scenarios."""
+    return replace(CandidateConfig(pre_roll_seconds=15, post_roll_seconds=10, min_seconds=20, max_seconds=30), **overrides)
+
+
 def segment(buffer: RollingBuffer, start: float, duration: float = 6, session: str = "a") -> int:
     path = buffer.segments_dir / f"segment_{session}_{start}.ts"
     path.write_bytes(b"fake media")
@@ -43,12 +48,13 @@ def add_event(store: CandidateStore, value: Event) -> None:
 def test_windows_clamp_and_merge_rules() -> None:
     config = CandidateConfig()
     normal = event_window(event(40), config)
-    assert (normal.start, normal.end) == (at(25), at(51))
+    assert (normal.start, normal.end) == (at(15), at(61))
     long = event_window(replace(event(100), start=at(0), end=at(200)), config)
-    assert 20 <= (long.end - long.start).total_seconds() <= 60
+    assert (long.end-long.start).total_seconds() == 60
+    assert long.start == at(60) and long.end == at(120)
     assert long.start <= at(85) and long.start < at(100) < long.end
     short = event_window(event(40), replace(config, pre_roll_seconds=1, post_roll_seconds=1))
-    assert (short.end - short.start).total_seconds() == 20
+    assert (short.end - short.start).total_seconds() == 30
     assert len(merge_windows([normal, event_window(event(60, 2), config)], config)) == 1
     assert len(merge_windows([normal, event_window(event(78, 2), config)], config)) == 2
 
@@ -85,10 +91,10 @@ def test_dedupe_restart_and_shared_pin_release(tmp_path: Path) -> None:
     buffer = RollingBuffer(tmp_path, 10)
     segment_id = segment(buffer, 0, 60)
     store = CandidateStore(buffer.manifest.database_path)
-    window = event_window(event(20), CandidateConfig())
+    window = event_window(event(20), short_config())
     records = buffer.manifest.all_records()
     first = store.create(window, records, at(30))
-    second = store.create(event_window(event(22, 2), CandidateConfig()), records, at(30))
+    second = store.create(event_window(event(22, 2), short_config()), records, at(30))
     restored = CandidateStore(buffer.manifest.database_path)
     assert restored.create(window, records, at(40)) == first
     assert len(restored.all()) == 2
@@ -101,7 +107,7 @@ def test_dedupe_restart_and_shared_pin_release(tmp_path: Path) -> None:
 
 
 def test_retention_race_ends_expired_and_restart_dedupes(tmp_path: Path) -> None:
-    config = CandidateConfig(output_dir=tmp_path / "out")
+    config = short_config(output_dir=tmp_path / "out")
     worker = CandidateExtractor(tmp_path / "segments", config)
     segment(worker.buffer, 0, 60)
     add_event(worker.store, event(20))
@@ -112,7 +118,7 @@ def test_retention_race_ends_expired_and_restart_dedupes(tmp_path: Path) -> None
 
 
 def test_worker_rejects_short_gap(tmp_path: Path) -> None:
-    worker = CandidateExtractor(tmp_path / "segments", CandidateConfig(output_dir=tmp_path / "out"))
+    worker = CandidateExtractor(tmp_path / "segments", short_config(output_dir=tmp_path / "out"))
     segment(worker.buffer, 0, 30)
     segment(worker.buffer, 40, 30, "b")
     add_event(worker.store, event(42, session="b"))
@@ -143,7 +149,7 @@ def test_startup_recovers_playable_and_abandons_corrupt(monkeypatch: pytest.Monk
 
 
 def test_later_events_merge_while_candidate_waits(tmp_path: Path) -> None:
-    worker = CandidateExtractor(tmp_path / "segments", CandidateConfig(output_dir=tmp_path / "out"))
+    worker = CandidateExtractor(tmp_path / "segments", short_config(output_dir=tmp_path / "out"))
     segment(worker.buffer, 0, 24)
     add_event(worker.store, event(20))
     first = worker.run_once(now=at(25))[0]
@@ -157,7 +163,7 @@ def test_later_events_merge_while_candidate_waits(tmp_path: Path) -> None:
 
 
 def test_extracting_candidate_is_retried_after_restart(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    config = CandidateConfig(output_dir=tmp_path / "out")
+    config = short_config(output_dir=tmp_path / "out")
     worker = CandidateExtractor(tmp_path / "segments", config)
     segment(worker.buffer, 0, 60)
     candidate_id = worker.store.create(event_window(event(20), config), worker.buffer.manifest.all_records(), at(30))
@@ -177,7 +183,7 @@ def test_manual_pin_added_during_reservation_survives_export(tmp_path: Path) -> 
     buffer = RollingBuffer(tmp_path, 900)
     identifier = segment(buffer, 0, 60)
     store = CandidateStore(buffer.manifest.database_path)
-    candidate = store.create(event_window(event(20), CandidateConfig()), buffer.manifest.all_records(), at(30))
+    candidate = store.create(event_window(event(20), short_config()), buffer.manifest.all_records(), at(30))
     buffer.pin([identifier])
     store.update(candidate, "extracted")
     assert buffer.manifest.all_records()[0].pinned
@@ -190,7 +196,7 @@ def test_cleanup_rechecks_reservation_after_stale_read(monkeypatch: pytest.Monke
     original = buffer.manifest.records_with_status
     def race(statuses: tuple[str, ...]) -> list:
         stale = original(statuses)
-        store.create(event_window(event(20), CandidateConfig()), stale, at(30))
+        store.create(event_window(event(20), short_config()), stale, at(30))
         return stale
     monkeypatch.setattr(buffer.manifest, "records_with_status", race)
     assert buffer.cleanup_once(at(100)) == 0
@@ -198,7 +204,7 @@ def test_cleanup_rechecks_reservation_after_stale_read(monkeypatch: pytest.Monke
 
 
 def test_padding_and_timeout_release(tmp_path: Path) -> None:
-    worker = CandidateExtractor(tmp_path / "segments", CandidateConfig(output_dir=tmp_path / "out"))
+    worker = CandidateExtractor(tmp_path / "segments", short_config(output_dir=tmp_path / "out"))
     for start in (0, 6, 12, 18, 24):
         segment(worker.buffer, start)
     add_event(worker.store, event(25))

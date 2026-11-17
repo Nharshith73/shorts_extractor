@@ -106,7 +106,7 @@ Twitch / YouTube Live / permitted test video input
 
 ### Stage 3 — Candidate clip extraction
 
-**Build:** Extract approximately 20–60 second windows around events, including lead-in and payoff; merge overlaps and deduplicate candidates.
+**Build:** Extract peak-centered candidates targeting 30–60 seconds, including lead-in and payoff; rank, merge and deduplicate candidates.
 
 **Acceptance test:** Export playable MP4 candidates with correct source timestamps and sufficient context.
 
@@ -209,7 +209,7 @@ streamclip-ai/
 | --- | --- |
 | Concurrent sources | 1 initially; scale to 3 |
 | Detection latency | Aim for <60 seconds after an event |
-| Candidate length | Approximately 20–60 seconds |
+| Candidate length | 30–60 seconds by default, usually about 45 seconds |
 | Export resolution | 1080×1920 (9:16) |
 | Paid LLM API requests | 0 |
 | Local model requests | Aim for 1 per shortlisted candidate |
@@ -274,6 +274,8 @@ Stage 2 performs local, lightweight audio and video analysis only—no LLM, spee
 
 Detection settings are under `detection:` in `config.yaml`. `scale_floors` and `relative_scale_floor` keep near-constant audio or video baselines from turning tiny codec fluctuations into large z-scores; each feature uses the largest of scaled MAD, its absolute floor, and the relative floor. Raw one-second features are persisted in the Stage 1 manifest database, making score thresholds and weights re-tunable without decoding media again.
 
+Candidate regions now use ranked audio/chat evidence after warmup. Local vocal-band contrast can qualify a real reaction even when a broad 300-second baseline keeps its global audio z-score small. The older `z_threshold` / `single_feature_threshold` rules remain diagnostic labels; `evidence_z_threshold` and composite ranking control the new selection path. Stage 3 applies quotas/cooldown before exporting.
+
 Follow newly completed segments while Stage 1 is running:
 
 ```powershell
@@ -318,11 +320,18 @@ python -m app.clips --config config.yaml
 python -m app.clips --config config.yaml --once
 ```
 
-Settings live under `candidates:`. Defaults are 15 seconds of pre-roll, 10 seconds of post-roll, 20–60 second clips, a 3 second merge gap, a 0.5 second live-edge grace period, and a 180 second wait timeout. `output_dir` defaults to `data/candidates`, relative to the config file. MP4/VOD cuts use input-side accurate seeking (`-ss` before `-i`) and re-encoding, AAC, and `+faststart`. Transport streams (`.ts`, `.mts`, `.m2ts`, `.mpegts`) retain output-side seeking because unindexed TS seeks can skip required video keyframes; buffered joins are short.
+Settings live under `candidates:`. Defaults are 25 seconds of pre-roll, 20 seconds of post-roll, 30–60 second clips, a 3 second merge gap, a 0.5 second live-edge grace period, and a 180 second wait timeout. `output_dir` defaults to `data/candidates`, relative to the config file. MP4/VOD cuts use input-side accurate seeking (`-ss` before `-i`) and re-encoding, AAC, and `+faststart`. Transport streams (`.ts`, `.mts`, `.m2ts`, `.mpegts`) retain output-side seeking because unindexed TS seeks can skip required video keyframes; buffered joins are short.
 
 The shipped config uses `candidates.encoder: auto`. Before its first export, each worker/VOD run tries a real one-second `h264_nvenc` encode at the source resolution. Auto selects NVENC only when the encode succeeds and produces frames; an encoder appearing in `ffmpeg -encoders` is insufficient. A failed probe logs the FFmpeg cause (including driver/API incompatibilities) and falls back to `libx264 -preset veryfast -crf 18`. The decision is cached for that worker/run. Explicit `encoder: libx264` skips the probe; explicit `encoder: h264_nvenc` requires usable NVIDIA encoding with preset p4 and CQ 18 and fails if it is unavailable. The older `video_encoder` key remains supported, but conflicting values for both keys are rejected.
 
-Windows start before the earlier of the region start and peak, and end after the region end. Long windows are limited to 60 seconds while retaining the peak and at least its configured pre-roll; short windows extend to 20 seconds. Windows from the same source/session merge when they overlap or are at most 3 seconds apart and the union is at most 60 seconds. Otherwise they remain separate. Merged windows use the highest-scoring event's peak when choosing the side of a discontinuity. Gap trimming may reduce the normal pre-roll; windows shorter than the minimum after trimming are `rejected_gap`.
+Windows start before the earlier of the region start and peak, and end after the region end. Any oversized window is re-centered around the strongest peak with two-thirds setup and one-third reaction (40s/20s at the 60-second maximum), scaled for a smaller configured maximum. The hard maximum is 60 seconds. Same-session neighboring windows merge when their union fits the cap or their primary peaks fall inside the cooldown; oversized merged clusters are re-centered on their highest-scoring peak. Snapshots retain the cluster's events, while `covered_event_ids` and `suppressed_event_ids` distinguish which peaks are inside the exported window. Gap trimming may reduce pre-roll; windows shorter than the minimum after trimming are `rejected_gap`.
+
+Live backlog selection is ranked before extraction, with `candidates.clips_per_hour: 12`, optional `top_k`, and `min_separation_seconds: 30`. The quota is per source over the rolling hour; `--top-k` overrides it. Nearer events are suppressed or merged into waiting candidates. Decisions persist in `candidate_selection_decisions` so restarts do not resurrect rejected transitions. This is causal selection of currently available events: an already exported clip cannot be replaced by a future stronger event.
+
+```powershell
+python -m app.clips --config config.yaml --once --top-k 5
+python -m app.clips --config config.yaml --clips-per-hour 12
+```
 
 The candidate ledger snapshots event IDs/scores and deduplicates by source and peak time, which survives detection replacing its event rows. Later events can merge into a waiting candidate; exported candidates retain their original snapshot. Available segments plus one neighboring segment on each side are reserved immediately; later segments are reserved on each poll. Shared reservations keep overlapping candidates protected independently. Candidates wait for completed coverage through the end plus grace, become `expired` when coverage has already disappeared, and become `timeout` if coverage does not arrive. Terminal statuses release their reservations, preserving manual pins. Successful exports produce `<id>.mp4` and `<id>.json`. Interrupted `extracting` rows are checked and retried by the next worker; output replacement is atomic per file. One OS-locked worker per manifest prevents simultaneous exports of the same candidate.
 
@@ -333,6 +342,39 @@ Stage 3 unit and media tests run with the normal suite:
 ```powershell
 python -m pytest -v -rs
 ```
+
+## One-command Windows workflow
+
+Download your recording to `data\vod-benchmark\one-hour-test\input\stream.mp4`, then run this from PowerShell in the repository:
+
+```powershell
+Set-Location E:\shorts_extractor
+.\run.cmd --streamer YOUR_STREAMER_HANDLE
+```
+
+The launcher uses `.venv\Scripts\python.exe` without environment activation or Make. It runs detection and ranked preview extraction, opens the HTML gallery in your browser, asks for terminal review decisions, then renders approved clips as captioned 1080×1920 Shorts. Use `y` to approve, `n` plus a reason code to reject, `s` to skip, and `q` to finish review and render approvals saved so far. Results default to `data\vod-benchmark\one-hour-test\results`; final videos are in its `final` folder. The shortlist defaults to the config's 12 clips/hour ceiling; weak moments do not fill unused slots.
+
+Existing dependencies and FFmpeg must already be installed. Detection uses `config.yaml`; rendering uses `render.yaml`, including its Whisper model setting. Keep the original recording available through rendering. The launcher does not download footage, install packages, or clear your results.
+
+```powershell
+# Optional matching chat, explicit quota, or a different source/output:
+.\run.cmd --streamer MyStreamer --chat data\vod-benchmark\one-hour-test\input\chat.json --top-k 12
+.\run.cmd --video "E:\recordings\my stream.mp4" --out "data\vod-benchmark\my-stream" --streamer MyStreamer
+
+# Resume after previews are ready; do not repeat detection:
+.\run.cmd --from-step rescore --streamer MyStreamer
+.\run.cmd --from-step review --streamer MyStreamer
+.\run.cmd --from-step render --streamer MyStreamer
+
+# Unattended: explicitly skip approval and render the entire shortlist:
+.\run.cmd --streamer MyStreamer --render-all
+
+# Inspect commands without processing media:
+.\run.cmd --dry-run
+.\run.cmd --help
+```
+
+When resuming a custom output, pass the same `--out` again. `--from-step rescore` regenerates the shortlist/previews from saved features with the current window config, then reviews and renders; it skips detection decoding. Changed windows need fresh approval. Use it to replace older 15-second previews with the new 30–60 second defaults after the previous launcher has exited. `--from-step render` uses saved approvals unless `--render-all` is specified. Failures stop the workflow before later stages. Additional options include `--start HH:MM:SS`, `--end HH:MM:SS`, `--clips-per-hour`, `--config`, `--render-config`, and `--no-browser`. Chat is used only when explicitly supplied; verify its offsets match the recording. This launcher runs the offline VOD pipeline; live workers retain their existing commands.
 
 ## Running VOD mode
 
@@ -351,24 +393,28 @@ python -m app.vod run --video E:\test_footage\gameplay.mp4 --out data\vod-trimme
 
 `vod.chunk_seconds` defaults to 300 seconds. Bounded FFmpeg audio/video reads carry unfinished one-second bins, audio filter state and previous-frame state across chunks. The existing bin-local spectral flux receives the complete bin even if it spans chunks. Final partial bins are retained. Progress includes percentage, elapsed time and real-time factor. `run.json` records audio/video decode and feature times, chat, scoring, selection and extraction, along with sampled peak RSS for Python plus child processes (100ms sampling). Decode timing measures blocked pipe reads, not CPU profiling; decoder work can overlap Python work. Detection speed has not been tuned here.
 
-`selection:` defaults to `clips_per_hour: 12`, `min_score: null`, and `min_separation_seconds: 30`. The budget is `ceil(clips_per_hour × analyzed hours)`, clamped to 3–40. Highest scores are selected with temporal separation after warmup, without requiring either threshold rule. A non-null min_score is the only score cutoff; short ranges, warmup, separation or a cutoff can leave fewer eligible clips. `events.json` contains the ranked shortlist and the original threshold events. Sidecars record `multi`, `single`, `multi+single` or `ranked_only`.
+`selection:` defaults to `clips_per_hour: 12`, `top_k: null`, `min_score: null`, and `min_separation_seconds: 30`. The rate budget is `ceil(clips_per_hour × analyzed hours)`, clamped to 3–40, or an explicit `--top-k` from 1–40. This is a ceiling: weak/visual-only bins do not fill unused slots. Ranking is independent of the older multi/single threshold rule, but requires audio/vocal contrast or chat evidence. `events.json` contains the ranked shortlist and the threshold events; sidecars record `multi`, `single`, `multi+single` or `ranked_only`.
 
-Final clip windows may overlap by at most **2 seconds**, independent of the peak separation setting. Selection keeps the higher-ranked window and continues down the ranking to fill the budget. Ranking uses capped combined score first, then the uncapped weighted combined score to break ties, then timestamp. The existing feature z-score clipping stays at `[0, 10]`. Sidecars and `review.csv` also store `unclipped_z_scores` and `unclipped_score`: the signed median/MAD z-scores before clipping, with the same scale floors, and their weighted sum. Raw negative values are retained for diagnostics; only the tie-break score uses that uncapped sum. Rescore updates these fields and the overlap policy from saved raw features without decoding the source.
+Final clip windows may overlap by at most **2 seconds**, independent of peak separation. Selection keeps the higher-ranked window and continues down eligible candidates up to the budget. The new composite weights vocal spikes, five-second audio contrast, broadband audio/onsets, chat surges and visual activity. Defaults live in `detection.ranking_weights`; `evidence_z_threshold`, `contrast_seconds`, `contrast_scale_db`, and `visual_only_penalty` tune eligibility and ranking. A sustained loud source loses contrast against its local baseline; isolated visual cuts are penalized and excluded. Voice-band energy is a proxy, not a speech classifier.
 
-VOD windows have independent defaults under `vod:`: pre-roll 8s, post-roll 6s, minimum 15s and maximum 45s. Pre-roll is strictly from the peak, never the earlier region edge. Minimum-length padding extends right only; if the file/trim end cannot accommodate it, that peak is skipped. Sidecars include actual pre/post offsets. Ranked clips remain independent rather than merging leftward and exceeding the peak pre-roll. Encoder settings still come from `candidates.encoder`; live ingestion/candidate window settings retain their behavior.
+Sidecars and `review.csv` include `reason_codes`, such as `vocal_spike`, `audio_contrast`, `chat_surge` and `audio_motion_peak`. `selection_diagnostics.json` includes every bin's eligibility, base/composite score, semantic ranking components and `visual_only_penalized` rejections. Z-score clipping remains `[0, 10]`. `unclipped_z_scores` and `unclipped_score` retain the signed raw-feature z-scores and their weighted sum, used to break composite-score ties. Rescoring reuses saved raw features.
+
+VOD defaults under `vod:` are pre-roll 25s, post-roll 20s, minimum 30s and maximum 60s. One-second ranked peaks normally produce 46-second clips (25s before the peak and the one-second peak bin plus 20s after). Longer event regions may extend toward the cap. Oversized windows use the shared 40s/20s peak-centered cap. Windows shift at file/trim boundaries to retain available context; ranges with less than 30 seconds of available footage are skipped. Sidecars record actual pre/post offsets. Encoder settings still come from `candidates.encoder`. The same 2-second maximum overlap still applies, so longer windows can reduce the selected count. Detection/scoring is unchanged by these duration defaults.
 
 Raw `features.csv` (including chat columns), `analysis.json` (source fingerprint, trim and decode parameters), and the window cache allow fast rescoring:
 
 ```powershell
 python -m app.vod rescore --out data\vod-gameplay --config config.yaml
 python -m app.vod rescore --out data\vod-gameplay --config config.yaml --extract
+python -m app.vod rescore --out data\vod-gameplay --config config.yaml --top-k 5 --extract
+python -m app.vod run --video E:\test_footage\gameplay.mp4 --out data\vod-gameplay --clips-per-hour 12 --streamer MyStreamer
 ```
 
 Rescore does not decode media. Without `--extract`, it updates metadata/review pages and reuses existing clips; missing windows are shown as not extracted. `--extract` renders only uncached windows. Changing decode sample rate, video FPS or chat alignment requires a new `run`. Fresh extraction checks the source fingerprint; cached windows can be reused even with the source offline. Review decisions follow window IDs through rank/filename changes. `.clip-cache` retains validated exports, so ranked copies use extra disk space; older unlisted files remain.
 
 Optional chat comes from a [TwitchDownloader JSON export](https://github.com/lay295/TwitchDownloader). Configure it under `detection.chat` in `config.yaml`: weights, scale floors, and `time_offset_seconds`. The offset is **added** to every comment offset: use `-600` if the local file begins at VOD second 600. Verify alignment yourself; the tool cannot infer a trimmed video's original offset. Missing/invalid timestamps are skipped, unknown authors do not inflate distinct-chatter counts, and empty text has zero emote/caps ratios.
 
-Chat bins contain messages per second, distinct known authors, annotated/known emote tokens divided by total tokens, and uppercase letters divided by all alphabetic characters. Emote density is approximate. The same median/MAD baseline, warmup and clipping apply to chat. Zero chat weights disable those signals. With no chat file, underlying audio/video feature and threshold scoring calculations retain their behavior; VOD ranking additionally considers below-threshold peaks.
+Chat bins contain messages per second, distinct known authors, annotated/known emote tokens divided by total tokens, and uppercase letters divided by all alphabetic characters. Emote density is approximate. The same median/MAD baseline, warmup and clipping apply to chat. Zero chat weights disable those signals. Ratio spikes require a message/chatter surge or at least three messages/chatters in the bin, so one uppercase message does not become a highlight. With no chat file, ranking uses only audio/video evidence; raw feature definitions and robust normalization are unchanged.
 
 Review paths and metadata in the terminal; it does not open or play media. Enter `y` to approve, `n` to reject, `s` to skip, or `q` to save and quit. Rejection requires a reason: `b` boring/nothing happens, `e` cut too early, `l` cut too late, `m` moment missing, `n` noise/audio artifact, or `o` other. Responses and reason_code are persisted; notes can be edited in the CSV.
 
@@ -398,6 +444,7 @@ python -m app.vod render --out data\vod-gameplay
 python -m app.vod render --out data\vod-gameplay --config render.yaml
 python -m app.vod render --out data\vod-gameplay --ranks 1,3,5 --config render.yaml
 python -m app.vod render --out data\vod-gameplay --all --config render.yaml
+python -m app.vod render --out data\vod-gameplay --config render.yaml --streamer MyStreamer
 ```
 
 The default `--config config.yaml` uses rendering defaults and inherits `candidates.encoder`. Customize the dedicated `render.yaml`, which contains all `render:` keys. Keep using `config.yaml` for ingestion: its strict top-level schema is unchanged, and a render-only config is not an ingestion config.
@@ -410,7 +457,11 @@ Speech recognition uses [faster-whisper](https://github.com/SYSTRAN/faster-whisp
 | --- | --- |
 | `whisper_model` | `small`; model name or local model directory |
 | `compute_type`, `device`, `language` | `int8`, `cpu`, `auto`; devices also accept `auto` and `cuda` |
-| `min_avg_logprob`, `max_no_speech_prob` | `-1.0`, `0.6`; reject a segment if either check fails |
+| `min_avg_logprob`, `max_no_speech_prob` | `-1.5`, `0.85`; more permissive reaction-oriented post-cache filtering |
+| `vad_filter` | `false`; optional opt-in, avoiding lost sudden shouts |
+| `reaction_fallback`, `reaction_tag` | `true`, `[HYPE]`; timed fallback for uncovered energy bursts |
+| `reaction_min_db`, `reaction_contrast_db`, `reaction_voice_ratio` | `-28`, `6`, `0.35`; thresholds on normalized clip audio |
+| `streamer`, `credit_enabled` | `null`, `true`; explicit handle and credit toggle |
 | `captions_enabled`, `caption_style` | `true`, `bold_yellow`; other styles are `clean_white` and `boxed` |
 | `uppercase`, `max_words`, `font_size` | `true`, `3`, `80`; 1–3 visible words per phrase |
 | `margin_horizontal`, `margin_bottom` | `80`, `400` pixels; validation protects the bottom 18% UI area |
@@ -421,7 +472,13 @@ Speech recognition uses [faster-whisper](https://github.com/SYSTRAN/faster-whisp
 | `target_lufs` | `-14`; single-pass loudnorm with -1.5 dBTP and LRA 11 |
 | `encoder`, `crf`, `preset` | `auto`, `18`, `medium`; auto reuses the real NVENC probe and CPU fallback |
 
-Captions use word timestamps and `vad_filter=True`, then discard suspect recognition segments. Phrase grouping considers word count, length, punctuation and pauses; discrete ASS events highlight only the current word. Caption timings are clip-relative, with original-source offsets also recorded in JSON. A clip without usable speech is still exported, with `caption_status: no_usable_speech` and no subtitles. A source without audio receives a silent AAC track and `source_has_no_audio`. The sidecar records rejected segment count, cache reuse, effective layout, font, encoder, caption text and word times.
+Temporary ASR audio is high-pass filtered, compressed, limited and loudness-normalized before PCM16 conversion. This reduces dynamic-range problems; it cannot restore information already lost to source clipping. Whisper uses word timestamps, `condition_on_previous_text=False`, VAD off by default, and disabled internal no-speech/logprob skipping; configurable post-cache confidence filtering remains. Existing transcript caches are invalidated once for this new audio/decoding pipeline. Phrase grouping and current-word highlighting retain the 9:16 safe margins.
+
+If recognition leaves a high-energy 300–3000 Hz burst uncovered, a timed `[HYPE]` tag fills that interval. Quiet/sustained audio and intervals already covered by words are excluded. This is a heuristic: game effects can resemble vocal reactions, and it does not prove that somebody screamed. JSON records `reaction_tags`, their times/reason, and `reaction_only` or `captioned_with_reactions` status. Raw audio measurements are cached alongside transcripts so style/fallback tuning avoids ASR. Clips without speech or detected reactions still render with `no_usable_speech`; audio-free sources receive a silent AAC track.
+
+Credit is burned into the same ASS overlay for the full clip, even without captions. A semi-transparent `Credit: @handle` sits at the safe top-left, separate from bottom captions/UI. Attribution precedence is render `--streamer`, `render.streamer`, clip metadata, VOD/chat owner metadata, then adjacent `<video-stem>.info.json` uploader metadata. A fresh VOD `--streamer` also persists attribution. Chat commenters and filenames are never guessed as the owner. Unknown attribution logs a warning and records `missing_streamer`; supply the handle explicitly. Relative ASS/fonts references remain Windows-safe and never use drawtext.
+
+Every new preview/final has a strict ffprobe duration guard of **60.0 seconds**, plus the existing 0.15s requested-duration check. Encoding leaves a 0.05s packet-rounding allowance near the cap. The default planner requests 30–60 seconds; explicitly configured shorter windows and existing short previews can still render as requested. Rendering a preview longer than 60 seconds re-plans from its original source around its saved peak (midpoint fallback for old metadata without a peak). Re-run `rescore --extract` or `.\run.cmd --from-step rescore` to regenerate current previews with the new defaults; historical unlisted files are not rewritten automatically.
 
 Put licensed Anton or Poppins-Bold TTF/OTF files in `assets/fonts` if desired; none are downloaded automatically. The fallback family is Arial Black, subject to system substitution if unavailable. Font files are staged in an explicit relative `fonts` directory. FFmpeg runs beside `captions.ass` and references `subtitles=filename=captions.ass:fontsdir=fonts`, so neither drive letters nor backslashes enter the filter. This uses libass, never drawtext.
 

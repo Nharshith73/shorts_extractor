@@ -14,6 +14,7 @@ import yaml
 from app.detection.models import FeatureBin
 from app.detection.scoring import AuxiliaryFeatures
 from .timeline import media_seconds
+from app.media_identity import metadata_streamer
 
 LOGGER = logging.getLogger(__name__)
 CHAT_NAMES = ("chat_message_rate", "chat_unique_chatters", "chat_emote_density", "chat_caps_ratio")
@@ -136,7 +137,11 @@ def aggregate_chat(messages: Sequence[ChatMessage], features: Sequence[FeatureBi
     return AuxiliaryFeatures(values, config.weights, config.scale_floors)
 
 
-def load_chat(path: Path, features: Sequence[FeatureBin], config: ChatConfig) -> AuxiliaryFeatures:
+def load_chat(path: Path, features: Sequence[FeatureBin], config: ChatConfig,
+              metadata: dict | None = None) -> AuxiliaryFeatures:
     with path.open(encoding="utf-8-sig") as stream:
-        messages = parse_chat(json.load(stream), config.time_offset_seconds)
+        data = json.load(stream)
+    if metadata is not None:
+        metadata["streamer"] = metadata_streamer(data)
+    messages = parse_chat(data, config.time_offset_seconds)
     return aggregate_chat(messages, features, config)

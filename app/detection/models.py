@@ -32,6 +32,10 @@ class ScoredBin:
     qualifies: bool
     unclipped_z_scores: dict[str, float] | None = None
     unclipped_score: float | None = None
+    ranking_score: float | None = None
+    reason_codes: tuple[str, ...] = ()
+    ranking_components: dict[str, float] | None = None
+    eligible: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,3 +51,5 @@ class DetectedEvent:
     components: dict[str, float]
     unclipped_z_scores: dict[str, float] | None = None
     unclipped_score: float | None = None
+    reason_codes: tuple[str, ...] = ()
+    ranking_components: dict[str, float] | None = None

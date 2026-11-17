@@ -3,6 +3,7 @@
 from pathlib import Path
 import logging
 import subprocess
+from .duration import encode_duration
 
 LOGGER = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class EncoderSelector:
 def render_cut(source: Path, output: Path, start_seconds: float, duration_seconds: float,
                *, video_encoder: str = "libx264", ffmpeg_binary: str = "ffmpeg",
                encoder_selector: EncoderSelector | None = None) -> None:
+    duration_seconds = encode_duration(duration_seconds)
     video_encoder = (encoder_selector or EncoderSelector(video_encoder, ffmpeg_binary)).select(source, start_seconds)
     codec = ["-c:v", video_encoder]
     codec += ["-preset", "veryfast", "-crf", "18"] if video_encoder == "libx264" else ["-preset", "p4", "-cq", "18"]

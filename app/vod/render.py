@@ -1,7 +1,7 @@
 """Render reviewed VOD candidates from original media, never preview pixels."""
 
 import csv
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 import logging
 import math
@@ -12,11 +12,14 @@ import time
 
 from app.clips.candidate_extractor import worker_lock
 from app.clips.render import EncoderSelector
-from app.rendering.captions import display_word
+from app.rendering.captions import credit_text, display_word
+from app.rendering.audio import reaction_frames
 from app.rendering.config import RenderConfig, load_render_config
 from app.rendering.renderer import MediaInfo, extract_audio, probe_media, render_original, validate_export
 from app.rendering.transcription import (Transcript, Transcriber, WhisperTranscriber, read_transcript,
-    save_transcript, transcript_key, usable_words)
+    save_transcript, transcript_key, usable_words, add_reaction_tags)
+from app.clips.duration import peak_bounds
+from app.media_identity import metadata_streamer, source_streamer, streamer_name
 from .artifacts import write_json
 
 LOGGER = logging.getLogger(__name__)
@@ -30,6 +33,7 @@ class RenderClip:
     start: float
     end: float
     metadata: dict
+    credit_source: str | None = None
 
 
 def parse_ranks(value: str) -> set[int]:
@@ -84,16 +88,46 @@ def clip_transcript(clip: RenderClip, output: Path, config: RenderConfig, info: 
     audio = work / "audio.wav"
     extract_audio(clip.source, audio, clip.start, clip.end - clip.start)
     transcript = transcriber.transcribe(audio)
+    transcript = replace(transcript, audio_frames=reaction_frames(audio))
     save_transcript(cache, key, transcript)
     return transcript, False, time.perf_counter() - started
+
+
+def bounded_render_clip(clip: RenderClip, info: MediaInfo) -> RenderClip:
+    peak = clip.metadata.get("peak_seconds")
+    if peak is None:
+        events = clip.metadata.get("events", [])
+        primary = max(events, key=lambda event: event.get("score", 0), default={})
+        peak = primary.get("peak_time_seconds", (clip.start+clip.end)/2)
+    peak = min(clip.end, max(clip.start, float(peak)))
+    start, end = peak_bounds(clip.start, clip.end, peak, lower=0, upper=info.duration)
+    metadata = {**clip.metadata, "original_start_seconds": clip.start, "original_end_seconds": clip.end,
+                "peak_seconds": peak}
+    return replace(clip, start=start, end=end, metadata=metadata)
+
+
+def context_streamer(output: Path) -> str | None:
+    path = output / "analysis.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        name = metadata_streamer(data)
+        if name:
+            return name
+        chat = Path(data["chat"]) if data.get("chat") else None
+        if chat is not None and chat.is_file():
+            return metadata_streamer(json.loads(chat.read_text(encoding="utf-8-sig")))
+    except (OSError, ValueError, TypeError):
+        LOGGER.warning("Unable to read VOD attribution metadata")
+    return None
 
 
 def render_clip(clip: RenderClip, output: Path, config: RenderConfig,
                 transcriber: Transcriber, selector: EncoderSelector) -> dict:
     begun = time.perf_counter()
     info = probe_media(clip.source)
-    if clip.end > info.duration + 0.001:
-        raise ValueError(f"rank {clip.rank} ends beyond original source duration")
+    clip = bounded_render_clip(clip, info)
     duration = clip.end - clip.start
     final = output / "final"
     final.mkdir(exist_ok=True)
@@ -102,10 +136,14 @@ def render_clip(clip: RenderClip, output: Path, config: RenderConfig,
         work = Path(temporary)
         transcript, cached, transcription_seconds = clip_transcript(clip, output, config, info, work, transcriber)
         words, rejected = usable_words(transcript, config, duration)
+        words, reactions = add_reaction_tags(transcript, words, config) if config.captions_enabled else ([], [])
         caption_status = ("disabled" if not config.captions_enabled else "source_has_no_audio" if not info.has_audio
-                          else "captioned" if words else "no_usable_speech")
-        if caption_status != "captioned":
+                          else "reaction_only" if reactions and all(word.kind == "reaction" for word in words)
+                          else "captioned_with_reactions" if reactions else "captioned" if words else "no_usable_speech")
+        if not words:
             LOGGER.info("Rank %d renders without captions: %s", clip.rank, caption_status)
+        elif reactions:
+            LOGGER.info("Rank %d uses %d heuristic reaction caption(s)", clip.rank, len(reactions))
         at = time.perf_counter()
         rendered = work / "final.mp4"
         layout, family, encoder = render_original(clip.source, rendered, clip.start, duration,
@@ -115,8 +153,13 @@ def render_clip(clip: RenderClip, output: Path, config: RenderConfig,
         payload = dict(schema=1, rank=clip.rank, video=str(clip.source), start_seconds=clip.start, end_seconds=clip.end,
             clip_path=str(path), preview_metadata=clip.metadata, settings=asdict(config),
             effective_layout=layout.effective_layout, video_encoder=encoder, font_family=family,
+            peak_seconds=clip.metadata["peak_seconds"], actual_pre_roll_seconds=clip.metadata["peak_seconds"]-clip.start,
+            actual_post_roll_seconds=clip.end-clip.metadata["peak_seconds"],
+            streamer=config.streamer, credit_text=credit_text(config), credit_source=clip.credit_source,
+            credit_status="burned_in" if credit_text(config) else "disabled" if not config.credit_enabled else "missing_streamer",
             width=actual.width, height=actual.height, fps=actual.fps, actual_duration_seconds=actual.duration,
             caption_status=caption_status, caption_text=" ".join(display_word(word.text, config.uppercase) for word in words),
+            reaction_tags=reactions,
             words=[dict(**asdict(word), source_start_seconds=clip.start + word.start,
                         source_end_seconds=clip.start + word.end) for word in words],
             transcription=dict(language=transcript.language, engine=transcript.engine, cache_hit=cached,
@@ -135,7 +178,8 @@ def render_clip(clip: RenderClip, output: Path, config: RenderConfig,
 
 
 def render_reviewed(output: Path, config_path: Path, *, all_clips: bool = False,
-                    ranks: set[int] | None = None, transcriber: Transcriber | None = None) -> dict:
+                    ranks: set[int] | None = None, transcriber: Transcriber | None = None,
+                    streamer: str | None = None) -> dict:
     output = output.resolve()
     config = load_render_config(config_path)
     config.validate()
@@ -143,13 +187,21 @@ def render_reviewed(output: Path, config_path: Path, *, all_clips: bool = False,
         raise ValueError("choose --all or --ranks")
     with worker_lock(output / ".vod.lock"):
         clips = selected_clips(output, all_clips, ranks)
+        context = context_streamer(output)
         recognizer = transcriber or WhisperTranscriber(config)
         selector = EncoderSelector(config.encoder)
         started = time.perf_counter()
         completed, failed = [], []
         for clip in clips:
             try:
-                completed.append(render_clip(clip, output, config, recognizer, selector))
+                identities = (("cli", streamer_name(streamer)), ("config", streamer_name(config.streamer)),
+                              ("clip_metadata", metadata_streamer(clip.metadata)), ("vod_metadata", context),
+                              ("source_metadata", source_streamer(clip.source)))
+                origin, name = next(((origin, name) for origin, name in identities if name), (None, None))
+                if config.credit_enabled and not name:
+                    LOGGER.warning("Rank %d has no streamer metadata; set --streamer to burn in credit", clip.rank)
+                completed.append(render_clip(replace(clip, credit_source=origin), output,
+                                              replace(config, streamer=name), recognizer, selector))
             except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
                 details = getattr(exc, "stderr", b"")
                 details = details.decode("utf-8", errors="replace") if isinstance(details, bytes) else details

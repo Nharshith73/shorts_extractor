@@ -133,7 +133,7 @@ def test_whisper_requests_word_timing_vad_and_clip_audio(monkeypatch: pytest.Mon
     recognizer.transcribe(tmp_path / "second.wav")
     assert result.segments[0].words[0].text == "hello"
     assert observed["device"] == "cpu" and observed["compute_type"] == "int8"
-    assert observed["word_timestamps"] is True and observed["vad_filter"] is True
+    assert observed["word_timestamps"] is True and observed["vad_filter"] is False
     assert observed["no_speech_threshold"] is None and observed["log_prob_threshold"] is None
     assert observed["language"] is None
     assert observed["audio"].endswith("second.wav")
@@ -178,7 +178,8 @@ def test_transcript_cache_identity_excludes_style_and_filter_thresholds(tmp_path
     assert first != transcript_key(source, 10, 20, replace(config, whisper_model="tiny"))
 
 
-def test_relative_subtitle_paths_with_spaces_and_medium_encode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("duration", [30, 45, 60])
+def test_relative_subtitle_paths_with_spaces_and_medium_encode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, duration: int) -> None:
     import app.rendering.renderer as module
     calls = []
     def run(command: list[str], **kwargs: object):
@@ -188,7 +189,7 @@ def test_relative_subtitle_paths_with_spaces_and_medium_encode(monkeypatch: pyte
     work.mkdir()
     source = tmp_path / "original source.mp4"
     source.touch()
-    render_original(source, work / "result.mp4", 720.125, 30, MediaInfo(1920, 1080, 900, True, 30),
+    render_original(source, work / "result.mp4", 720.125, duration, MediaInfo(1920, 1080, 900, True, 30),
                     words(), RenderConfig(), work, EncoderSelector("libx264"))
     command, options = calls[0]
     graph = command[command.index("-filter_complex") + 1]
@@ -197,6 +198,7 @@ def test_relative_subtitle_paths_with_spaces_and_medium_encode(monkeypatch: pyte
     assert options["cwd"] == work and command[command.index("-i") + 1] == str(source)
     assert command.index("-ss") < command.index("-i")
     assert command[command.index("-preset") + 1] == "medium"
+    assert float(command[command.index("-t") + 1]) == pytest.approx(min(duration, 59.95))
     assert command[command.index("-b:a") + 1] == "192k"
     assert "loudnorm=I=-14:TP=-1.5:LRA=11" in command
 
@@ -209,8 +211,13 @@ def test_render_cache_reuse_and_no_usable_speech_metadata(monkeypatch: pytest.Mo
     monkeypatch.setattr(module, "probe_media", lambda path: MediaInfo(1920, 1080, 100, True, 30))
     seen = []
     def audio(path: Path, output: Path, start: float, duration: float) -> None:
+        import wave
         seen.append((path, start, duration))
-        output.touch()
+        with wave.open(str(output), "wb") as stream:
+            stream.setnchannels(1)
+            stream.setsampwidth(2)
+            stream.setframerate(16000)
+            stream.writeframes(bytes(round(duration*16000)*2))
     monkeypatch.setattr(module, "extract_audio", audio)
     def export(path, output, start, duration, info, words, config, work, selector):
         assert path == source

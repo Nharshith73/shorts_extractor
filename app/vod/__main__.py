@@ -21,10 +21,15 @@ def main() -> int:
     run_parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     run_parser.add_argument("--start", type=parse_timestamp, default=0.0)
     run_parser.add_argument("--end", type=parse_timestamp)
+    run_parser.add_argument("--streamer", help="Source streamer handle for final credit attribution")
     rescore_parser = commands.add_parser("rescore")
     rescore_parser.add_argument("--out", type=Path, required=True)
     rescore_parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     rescore_parser.add_argument("--extract", action="store_true")
+    for command in (run_parser, rescore_parser):
+        ranking = command.add_mutually_exclusive_group()
+        ranking.add_argument("--top-k", type=int)
+        ranking.add_argument("--clips-per-hour", type=float)
     summary_parser = commands.add_parser("summary")
     summary_parser.add_argument("--out", type=Path, required=True)
     review_parser = commands.add_parser("review")
@@ -32,6 +37,7 @@ def main() -> int:
     render_parser = commands.add_parser("render", help="Render reviewed clips as captioned vertical Shorts")
     render_parser.add_argument("--out", type=Path, required=True)
     render_parser.add_argument("--config", type=Path, default=Path("config.yaml"))
+    render_parser.add_argument("--streamer", help="Override inferred/configured credit handle")
     from .render import parse_ranks
     render_selection = render_parser.add_mutually_exclusive_group()
     render_selection.add_argument("--all", action="store_true", help="Render all reviewed preview rows")
@@ -45,16 +51,17 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
         if args.command == "run":
-            run(args.video, args.out, args.config, args.chat, args.start, args.end)
+            run(args.video, args.out, args.config, args.chat, args.start, args.end,
+                top_k=args.top_k, clips_per_hour=args.clips_per_hour, streamer=args.streamer)
         elif args.command == "rescore":
-            rescore(args.out, args.config, args.extract)
+            rescore(args.out, args.config, args.extract, top_k=args.top_k, clips_per_hour=args.clips_per_hour)
         elif args.command == "summary":
             summary(args.out)
         elif args.command == "review":
             review(args.out)
         elif args.command == "render":
             from .render import render_reviewed
-            report = render_reviewed(args.out, args.config, all_clips=args.all, ranks=args.ranks)
+            report = render_reviewed(args.out, args.config, all_clips=args.all, ranks=args.ranks, streamer=args.streamer)
             return 2 if report["failed"] else 0
         else:
             evaluate(args.out, args.labels, args.tolerance, args.top_k)

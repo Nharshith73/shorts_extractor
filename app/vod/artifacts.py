@@ -13,7 +13,7 @@ from .chat import CHAT_NAMES, ChatConfig
 from .timeline import media_seconds, media_time
 
 REVIEW_FIELDS = ("clip_path", "start_seconds", "end_seconds", "score", "top_features", "approved", "notes",
-                 "reason_code", "window_id", "rank", "peak_seconds", "rule", "unclipped_z_scores", "unclipped_score")
+                 "reason_code", "window_id", "rank", "peak_seconds", "rule", "unclipped_z_scores", "unclipped_score", "reason_codes")
 
 
 def write_json(path: Path, data: object) -> None:

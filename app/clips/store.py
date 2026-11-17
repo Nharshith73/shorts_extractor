@@ -48,6 +48,11 @@ class CandidateStore:
                     segment_id INTEGER PRIMARY KEY, was_pinned INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status);
+                CREATE TABLE IF NOT EXISTS candidate_selection_decisions (
+                    source_id TEXT NOT NULL, peak_wall_utc TEXT NOT NULL, score REAL NOT NULL,
+                    reason TEXT NOT NULL, created_utc TEXT NOT NULL,
+                    PRIMARY KEY(source_id, peak_wall_utc)
+                );
             """)
 
     @contextmanager
@@ -67,22 +72,33 @@ class CandidateStore:
             rows = connection.execute("""
                 SELECT e.* FROM events e LEFT JOIN candidate_events c
                 ON c.source_id=e.source_id AND c.peak_wall_utc=e.peak_wall_utc
-                WHERE c.candidate_id IS NULL ORDER BY e.peak_wall_utc, e.id
+                LEFT JOIN candidate_selection_decisions d ON d.source_id=e.source_id AND d.peak_wall_utc=e.peak_wall_utc
+                WHERE c.candidate_id IS NULL AND d.source_id IS NULL ORDER BY e.peak_wall_utc, e.id
             """).fetchall()
         return [Event(int(row["id"]), row["source_id"], row["session_id"],
                       from_utc_text(row["peak_wall_utc"]), from_utc_text(row["start_wall_utc"]),
-                      from_utc_text(row["end_wall_utc"]), float(row["score"])) for row in rows]
+                      from_utc_text(row["end_wall_utc"]), float(row["score"]),
+                      tuple(json.loads(row["reason_codes_json"])) if "reason_codes_json" in row.keys() else (),
+                      json.loads(row["components_json"]) if "components_json" in row.keys() else {},
+                      json.loads(row["ranking_components_json"]) if "ranking_components_json" in row.keys() else {}) for row in rows]
+
+    def record_selection_decision(self, event: Event, reason: str, now: datetime) -> None:
+        with self.connect() as connection:
+            connection.execute("INSERT OR IGNORE INTO candidate_selection_decisions VALUES (?,?,?,?,?)",
+                               (event.source_id, to_utc_text(event.peak), event.score, reason, to_utc_text(now)))
 
     @staticmethod
     def _snapshot(window: Window) -> str:
         return json.dumps([dict(id=e.id, source_id=e.source_id, session_id=e.session_id,
                                 peak=to_utc_text(e.peak), start=to_utc_text(e.start),
-                                end=to_utc_text(e.end), score=e.score) for e in window.events])
+                                end=to_utc_text(e.end), score=e.score, reason_codes=e.reason_codes,
+                                components=e.components, ranking_components=e.ranking_components) for e in window.events])
 
     @staticmethod
     def _decode(row: sqlite3.Row) -> Candidate:
         events = tuple(Event(int(e["id"]), e["source_id"], e["session_id"], from_utc_text(e["peak"]),
-                             from_utc_text(e["start"]), from_utc_text(e["end"]), float(e["score"]))
+                             from_utc_text(e["start"]), from_utc_text(e["end"]), float(e["score"]),
+                             tuple(e.get("reason_codes", ())), e.get("components", {}), e.get("ranking_components", {}))
                        for e in json.loads(row["event_snapshot"]))
         return Candidate(row["id"], Window(events, from_utc_text(row["start_wall_utc"]),
                          from_utc_text(row["end_wall_utc"]), bool(row["has_gap"])), row["status"],

@@ -14,16 +14,17 @@ class SelectionConfig:
     clips_per_hour: float = 12
     min_score: float | None = None
     min_separation_seconds: float = 30
+    top_k: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class VodConfig:
     chunk_seconds: float = 300
     progress_seconds: float = 15
-    pre_roll_seconds: float = 8
-    post_roll_seconds: float = 6
-    min_seconds: float = 15
-    max_seconds: float = 45
+    pre_roll_seconds: float = 25
+    post_roll_seconds: float = 20
+    min_seconds: float = 30
+    max_seconds: float = 60
 
 
 def load_settings(path: Path) -> tuple[VodConfig, SelectionConfig, CandidateConfig]:
@@ -38,11 +39,25 @@ def load_settings(path: Path) -> tuple[VodConfig, SelectionConfig, CandidateConf
         raise ValueError("chunk/progress seconds and clips_per_hour must be positive")
     if selection.min_score is not None and not math.isfinite(selection.min_score):
         raise ValueError("selection.min_score must be finite or null")
+    if selection.top_k is not None and (type(selection.top_k) is not int or not 1 <= selection.top_k <= 40):
+        raise ValueError("selection.top_k must be an integer from 1 to 40 or null")
     base, _, _ = load_candidates(path)
     windows = replace(base, pre_roll_seconds=vod.pre_roll_seconds, post_roll_seconds=vod.post_roll_seconds,
                       min_seconds=vod.min_seconds, max_seconds=vod.max_seconds)
     windows.validate()
     return vod, selection, windows
+
+
+def override_selection(selection: SelectionConfig, top_k: int | None = None,
+                       clips_per_hour: float | None = None) -> SelectionConfig:
+    if top_k is not None and clips_per_hour is not None:
+        raise ValueError("choose top-k or clips-per-hour")
+    if top_k is not None and not 1 <= top_k <= 40:
+        raise ValueError("top-k must be 1..40")
+    if clips_per_hour is not None and (not math.isfinite(clips_per_hour) or clips_per_hour <= 0):
+        raise ValueError("clips-per-hour must be finite and positive")
+    return replace(selection, top_k=top_k if top_k is not None else (None if clips_per_hour is not None else selection.top_k),
+                   clips_per_hour=clips_per_hour if clips_per_hour is not None else selection.clips_per_hour)
 
 
 def vars_for(config: VodConfig) -> tuple[float, ...]:

@@ -1,11 +1,12 @@
 """Pure candidate window planning, merging, and boundary trimming."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Sequence
 
 from app.ingestion.rolling_buffer import SegmentRecord, SessionBoundary
 from .config import CandidateConfig
+from .duration import peak_bounds
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +18,9 @@ class Event:
     start: datetime
     end: datetime
     score: float
+    reason_codes: tuple[str, ...] = ()
+    components: dict[str, float] = field(default_factory=dict)
+    ranking_components: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,15 +38,16 @@ class Window:
 def event_window(event: Event, config: CandidateConfig) -> Window:
     start = min(event.peak, event.start) - timedelta(seconds=config.pre_roll_seconds)
     end = max(event.peak, event.end) + timedelta(seconds=config.post_roll_seconds)
-    if (end - start).total_seconds() > config.max_seconds:
-        start = max(start, event.peak - timedelta(seconds=config.max_seconds - 0.001))
-        end = min(end, start + timedelta(seconds=config.max_seconds))
-        if end <= event.peak:
-            end = event.peak + timedelta(milliseconds=1)
-            start = end - timedelta(seconds=config.max_seconds)
     if (end - start).total_seconds() < config.min_seconds:
         end = start + timedelta(seconds=config.min_seconds)
-    return Window((event,), start, end)
+    return cap_window(Window((event,), start, end), config)
+
+
+def cap_window(window: Window, config: CandidateConfig) -> Window:
+    origin = window.primary.peak
+    start, end = peak_bounds((window.start-origin).total_seconds(), (window.end-origin).total_seconds(),
+                             0, maximum=config.duration_limit)
+    return replace(window, start=origin + timedelta(seconds=start), end=origin + timedelta(seconds=end))
 
 
 def merge_windows(windows: Sequence[Window], config: CandidateConfig) -> list[Window]:
@@ -52,10 +57,13 @@ def merge_windows(windows: Sequence[Window], config: CandidateConfig) -> list[Wi
             previous = result[-1]
             same_session = (previous.primary.source_id, previous.primary.session_id) == (window.primary.source_id, window.primary.session_id)
             end = max(previous.end, window.end)
-            if same_session and window.start <= previous.end + timedelta(seconds=config.merge_gap_seconds) and (end - previous.start).total_seconds() <= config.max_seconds:
-                result[-1] = Window(previous.events + window.events, previous.start, end)
+            # A nearby cluster becomes one peak-centred clip even if its union is long.
+            close_peaks = abs((window.primary.peak-previous.primary.peak).total_seconds()) < config.min_separation_seconds
+            fits = (end-previous.start).total_seconds() <= config.duration_limit
+            if same_session and window.start <= previous.end + timedelta(seconds=config.merge_gap_seconds) and (fits or close_peaks):
+                result[-1] = cap_window(Window(previous.events + window.events, previous.start, end), config)
                 continue
-        result.append(window)
+        result.append(cap_window(window, config))
     return result
 
 

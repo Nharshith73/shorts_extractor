@@ -18,7 +18,7 @@ from app.vod.timeline import media_seconds, media_time
 
 def item(second: float, score: float, raw: float | None = None) -> ScoredBin:
     feature = FeatureBin("s", "vod", media_time(second), 1, -20, -30, 0, 0, 0)
-    return ScoredBin(feature, {"motion": min(score, 10)}, score, False,
+    return ScoredBin(feature, {"motion": min(score, 10), "voice_energy_db": 2}, score, False,
                      {"motion": raw} if raw is not None else None, raw)
 
 
@@ -39,12 +39,21 @@ def test_exactly_two_seconds_overlap_allowed_but_more_rejected() -> None:
 
 
 def test_final_long_windows_obey_overlap_even_when_peak_separation_passes() -> None:
-    windows = CandidateConfig(pre_roll_seconds=8, post_roll_seconds=6, min_seconds=45, max_seconds=45)
-    selected = select([item(40, 10), item(70, 9), item(100, 8), item(160, 7)], windows=windows, separation=30)
+    windows = CandidateConfig(pre_roll_seconds=8, post_roll_seconds=6, min_seconds=30, max_seconds=30)
+    selected = select([item(40, 10), item(60, 9), item(100, 8), item(160, 7)], windows=windows, separation=20)
     assert [media_seconds(event.peak_wall_utc) for event, _ in selected] == [40, 100, 160]
     bounds = [peak_window(event, windows, 0, 240) for event, _ in selected]
     for index, (start, end) in enumerate(bounds):
         assert all(min(end, right) - max(start, left) <= 2 for left, right in bounds[index + 1:])
+
+
+def test_longer_defaults_drop_overlaps_and_continue_filling_the_shortlist() -> None:
+    selected = select([item(40, 10), item(60, 9), item(95, 8), item(150, 7)], windows=CandidateConfig())
+    assert [media_seconds(event.peak_wall_utc) for event, _ in selected] == [40, 95, 150]
+    bounds = [peak_window(event, CandidateConfig(), 0, 240) for event, _ in selected]
+    assert all(end-start == 46 for start, end in bounds)
+    for index, (start, end) in enumerate(bounds):
+        assert all(min(end, right) - max(start, left) <= 2 for left, right in bounds[index+1:])
 
 
 def test_unclipped_sum_breaks_only_capped_score_ties() -> None:
@@ -78,7 +87,9 @@ def test_rescore_exports_raw_components_to_csv_and_sidecars(tmp_path: Path) -> N
     config = tmp_path / "config.yaml"
     config.write_text("detection:\n  warmup_seconds: 0\nselection:\n  min_separation_seconds: 0\n", encoding="utf-8")
     base = item(0, 0).feature
-    features = [replace(base, wall_utc=media_time(second), motion=100 if second in (40, 90, 140) else 0)
+    features = [replace(base, wall_utc=media_time(second), motion=100 if second in (40, 90, 140) else 0,
+                        audio_rms_db=-10 if second in (40, 90, 140) else -20,
+                        voice_energy_db=-15 if second in (40, 90, 140) else -30)
                 for second in range(180)]
     write_features(tmp_path / "features.csv", features, None)
     write_json(tmp_path / "analysis.json", dict(video="unavailable.mp4", source_id="s", fingerprint={},
@@ -90,8 +101,8 @@ def test_rescore_exports_raw_components_to_csv_and_sidecars(tmp_path: Path) -> N
     for row in rows:
         raw = json.loads(row["unclipped_z_scores"])
         assert raw["motion"] == 100
-        assert float(row["unclipped_score"]) == 100
+        assert float(row["unclipped_score"]) == sum(raw.values())
         sidecar = json.loads(Path(row["clip_path"]).with_suffix(".json").read_text())
         assert sidecar["unclipped_z_scores"] == raw
-        assert sidecar["unclipped_score"] == 100
+        assert sidecar["unclipped_score"] == sum(raw.values())
         assert sidecar["components"]["motion"] == 10
