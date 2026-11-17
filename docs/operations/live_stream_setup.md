@@ -70,12 +70,41 @@ gpu:
 
 ## 3. Operator CLI Workflows
 
-### 3.1 Validate Source Authorization & Connectivity
+### 3.1 Production Preflight Audit
+Before initiating live operations, run the preflight verification command to audit all 11 critical production criteria without initiating persistent media capture:
+
+```powershell
+# Standard terminal report with PASS/WARN/FAIL status table
+python -m app.live preflight --config source.yaml
+
+# Structured JSON report for automated orchestration pipelines
+python -m app.live preflight --config source.yaml --json
+```
+
+**Audited Criteria:**
+1. **Source Configuration Validity**: Parses YAML structure, numeric intervals, and retention windows.
+2. **Authorization Record Completeness**: Verifies `permission_reference` and legal consent metadata.
+3. **Permission Status**: Enforces all 5 mandatory gates (`permitted`, `capture`, `clipping`, `editing`, `publishing`).
+4. **FFmpeg & ffprobe Availability**: Probes system binaries and verifies `h264_nvenc` hardware acceleration.
+5. **SQLite Database Availability**: Validates segment manifest path and enforces WAL mode journal persistence.
+6. **Capture Directory Permissions**: Probes read/write/delete access across live segments, candidates, context, judgments, and shorts directories.
+7. **Required Environment Variables**: Inspects `STREAMCLIP_LIVE_INPUT` and `YOUTUBE_API_KEY`.
+8. **Media Input Protocol**: Distinguishes between web metadata URLs (YouTube watch pages) and direct media feeds (RTMP/SRT/HLS/UDP).
+9. **Qwen Server Availability**: Probes live server health at `http://127.0.0.1:8080/health` or verifies offline disk assets (`llama-server.exe`, Qwen GGUF model, mmproj) for automatic cold start.
+10. **GPU Resource Availability**: Queries NVIDIA GPU VRAM headroom ($\ge 500$ MB free).
+11. **Model & Render Configuration**: Validates `judge.yaml`, `render.yaml`, and subtitle font assets.
+
+**Preflight Exit Codes:**
+- `0`: `FIRST LIVE STREAM READY` — All infrastructure, models, directories, and direct media feeds are active.
+- `2`: `FIRST LIVE STREAM VERIFIED WITH LIMITATIONS` — Infrastructure and models are 100% verified; awaiting direct creator stream feed (`STREAMCLIP_LIVE_INPUT`).
+- `1`: `FIRST LIVE STREAM NOT READY` — Critical failure (missing binaries, unpermitted gates, or schema error).
+
+### 3.2 Validate Source Authorization & Connectivity
 ```powershell
 python -m app.live validate-source --config source.yaml
 ```
 
-### 3.2 Start Live Capture & Pipeline
+### 3.3 Start Live Capture & Pipeline
 ```powershell
 # Production run with real local Qwen VLM
 python -m app.live start --config source.yaml --foreground

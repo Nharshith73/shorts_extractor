@@ -14,6 +14,9 @@ import httpx
 
 from .youtube import YOUTUBE_API_BASE
 
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -66,12 +69,12 @@ class LiveChatPoller:
 
     def _poll_loop(self) -> None:
         url = f"{YOUTUBE_API_BASE}/liveChat/messages"
+        headers = {"X-Goog-Api-Key": self.api_key}
 
         while not self._stop_event.is_set():
             params: dict[str, Any] = {
                 "liveChatId": self.live_chat_id,
                 "part": "id,snippet,authorDetails",
-                "key": self.api_key,
                 "maxResults": 200,
             }
             if self._next_page_token:
@@ -79,7 +82,7 @@ class LiveChatPoller:
 
             sleep_duration = self.poll_interval_seconds
             try:
-                with httpx.Client(timeout=10.0) as client:
+                with httpx.Client(timeout=10.0, headers=headers) as client:
                     resp = client.get(url, params=params)
                     if resp.status_code == 200:
                         data = resp.json()

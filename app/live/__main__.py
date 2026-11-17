@@ -12,64 +12,85 @@ from app.evaluation.inference import MockHighlightJudgeProvider
 from app.evaluation.providers.qwen import QwenProviderConfig, QwenVisionLanguageProvider
 from .config import AuthorizationError, LiveSourceConfig, MissingMediaInputError, load_source_config
 from .pipeline import SingleStreamLivePipeline
+from .preflight import run_preflight
 from .queue import LiveJudgmentQueue
 from .review import LiveReviewStore
 from .supervisor import LiveSupervisor, SupervisorStateStore
-from .youtube import inspect_youtube_source
+from .youtube import (
+    diagnose_youtube_source,
+    format_youtube_diagnostic_report,
+    inspect_youtube_source,
+)
 
 LOGGER = logging.getLogger("app.live")
 
 
 def main() -> int:
+    common_parser = argparse.ArgumentParser(add_help=False)
+    common_parser.add_argument("--config", type=Path, default=Path("source.yaml"), help="Path to source.yaml (default: source.yaml)")
+    common_parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
+
     parser = argparse.ArgumentParser(
         prog="python -m app.live",
         description="StreamClip AI — Single-Stream Live Intelligence Operator CLI",
+        parents=[common_parser],
     )
-    parser.add_argument("--config", type=Path, default=Path("source.yaml"), help="Path to source.yaml (default: source.yaml)")
-    parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # 1. start
-    start_parser = subparsers.add_parser("start", help="Start continuous live capture and AI pipeline")
+    start_parser = subparsers.add_parser("start", parents=[common_parser], help="Start continuous live capture and AI pipeline")
     start_parser.add_argument("--media-override", default=None, help="Direct media feed URL override (e.g. rtmp://... or test video)")
     start_parser.add_argument("--mock-ai", action="store_true", help="Use MockHighlightJudgeProvider instead of real local Qwen VLM")
     start_parser.add_argument("--cpu-ai", action="store_true", help="Run Qwen inference on CPU (n_gpu_layers=0)")
     start_parser.add_argument("--foreground", action="store_true", help="Run synchronously in foreground (Ctrl+C to stop)")
 
     # 2. status
-    subparsers.add_parser("status", help="Inspect live supervisor, capture, and queue status")
+    subparsers.add_parser("status", parents=[common_parser], help="Inspect live supervisor, capture, and queue status")
 
     # 3. stop
-    subparsers.add_parser("stop", help="Gracefully stop live stream capture and pipeline")
+    subparsers.add_parser("stop", parents=[common_parser], help="Gracefully stop live stream capture and pipeline")
 
     # 4. candidates
-    cand_parser = subparsers.add_parser("candidates", help="List extracted candidates and dual rankings")
+    cand_parser = subparsers.add_parser("candidates", parents=[common_parser], help="List extracted candidates and dual rankings")
     cand_parser.add_argument("--limit", type=int, default=25, help="Maximum candidates to display (default: 25)")
 
     # 5. queue
-    q_parser = subparsers.add_parser("queue", help="Inspect persistent AI judgment queue")
+    q_parser = subparsers.add_parser("queue", parents=[common_parser], help="Inspect persistent AI judgment queue")
     q_parser.add_argument("--limit", type=int, default=25, help="Maximum queue jobs to display")
     q_parser.add_argument("--status-filter", choices=["PENDING", "RUNNING", "COMPLETED", "RETRY_WAIT", "FAILED"], default=None)
 
     # 6. approve
-    app_parser = subparsers.add_parser("approve", help="Approve an extracted candidate for publishing")
+    app_parser = subparsers.add_parser("approve", parents=[common_parser], help="Approve an extracted candidate for publishing")
     app_parser.add_argument("candidate_id", help="Candidate ID to approve")
     app_parser.add_argument("--notes", default="", help="Optional editorial notes")
 
     # 7. reject
-    rej_parser = subparsers.add_parser("reject", help="Reject an extracted candidate")
+    rej_parser = subparsers.add_parser("reject", parents=[common_parser], help="Reject an extracted candidate")
     rej_parser.add_argument("candidate_id", help="Candidate ID to reject")
     rej_parser.add_argument("--reason", default="Rejected by operator", help="Rejection reason")
 
     # 8. validate-source
-    subparsers.add_parser("validate-source", help="Validate source authorization and media feed availability")
+    subparsers.add_parser("validate-source", parents=[common_parser], help="Validate source authorization and media feed availability")
+
+    # 9. preflight
+    preflight_parser = subparsers.add_parser("preflight", parents=[common_parser], help="Run comprehensive production preflight audit")
+    preflight_parser.add_argument("--json", action="store_true", help="Output preflight audit report in JSON format")
 
     args = parser.parse_args()
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    # Fast-path for preflight: evaluate before load_source_config so missing/invalid config is caught cleanly
+    if args.command == "preflight":
+        report = run_preflight(config_path=args.config)
+        if args.json:
+            print(json.dumps(report.to_dict(), indent=2))
+        else:
+            print(report.render_text())
+        return report.exit_code
 
     # Load source.yaml
     try:
@@ -96,15 +117,11 @@ def main() -> int:
             print(f"Authorization:  BLOCKED ({exc})")
             return 1
 
-        # Inspect YouTube metadata if watch_url provided
+        # Inspect YouTube metadata and diagnostic report if watch_url provided
         if config.watch_url:
-            yt_meta = inspect_youtube_source(config.watch_url)
-            print(f"\nYouTube API Status: {'Available' if yt_meta.api_available else 'Offline/Unauthenticated'}")
-            print(f"Broadcast State:    {yt_meta.live_broadcast_content}")
-            print(f"Is Live:            {yt_meta.is_live}")
-            print(f"Chat Enabled:       {yt_meta.chat_enabled} (Active Chat ID: {yt_meta.active_live_chat_id or 'none'})")
-            if yt_meta.error_message:
-                print(f"Note:               {yt_meta.error_message}")
+            diag = diagnose_youtube_source(config.watch_url)
+            print()
+            print(format_youtube_diagnostic_report(diag))
 
         # Resolve media input feed
         print("\nMedia Acquisition Check:")
@@ -113,7 +130,7 @@ def main() -> int:
             print(f"Media Input:    RESOLVED -> {media_url[:60]}...")
             return 0
         except MissingMediaInputError as exc:
-            print(f"Media Input:    BLOCKED -> {exc}")
+            print(f"Media Input:    BLOCKED -> {exc}\n")
             return 2
 
     elif args.command == "status":

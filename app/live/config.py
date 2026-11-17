@@ -151,7 +151,11 @@ class LiveSourceConfig:
         self.capture.validate()
 
 
-def load_source_config(config_path: Path, media_override: str | None = None) -> LiveSourceConfig:
+def load_source_config(
+    config_path: Path,
+    media_override: str | None = None,
+    validate_auth: bool = True,
+) -> LiveSourceConfig:
     """Load and validate source.yaml."""
     path = config_path.resolve()
     if not path.is_file():
@@ -226,5 +230,10 @@ def load_source_config(config_path: Path, media_override: str | None = None) -> 
         queue=queue_cfg,
         gpu=gpu_cfg,
     )
-    config.validate()
+    if validate_auth:
+        config.validate()
+    else:
+        if not config.id.strip():
+            raise ValueError("source id must not be empty")
+        config.capture.validate()
     return config
