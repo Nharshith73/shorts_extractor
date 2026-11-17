@@ -1,0 +1,12 @@
+{
+  "test": "concurrent_nvenc_and_qwen_inference",
+  "nvenc_exit_code": 0,
+  "nvenc_success": true,
+  "inference_latency_seconds": 9.808,
+  "tokens_per_second": 42.03,
+  "vram_peak_mb": 7422.0,
+  "vram_free_mb": 527.0,
+  "rating": 1,
+  "category": "ordinary",
+  "summary": "A series of static frames showing a test pattern with moving lines."
+}

@@ -13,6 +13,9 @@ from .annotate import annotate_interval
 from .context import FrameSamplerConfig, build_candidate_context
 from .dataset import DEFAULT_MANIFEST_PATH, EvaluationDataset
 from .evaluate import evaluate_candidates, export_evaluation_artifacts
+from .inference import MockHighlightJudgeProvider
+from .judge import judge_candidates
+from .providers.qwen import QwenProviderConfig, QwenVisionLanguageProvider
 
 LOGGER = logging.getLogger("app.evaluation")
 
@@ -59,6 +62,17 @@ def main() -> int:
     eval_parser.add_argument("--out", type=Path, required=True, help="Output directory for evaluation reports")
     eval_parser.add_argument("--top-k", type=int, default=10, help="Evaluate on top-K candidates (default: 10)")
     eval_parser.add_argument("--min-iou", type=float, default=0.20, help="Minimum temporal IoU for candidate-label match")
+
+    # 4. judge
+    judge_parser = subparsers.add_parser("judge", help="Judge candidate highlights with local multimodal AI model")
+    judge_parser.add_argument("--out", type=Path, required=True, help="Path to VOD output directory containing clips.json")
+    judge_parser.add_argument("--candidate-id", default=None, help="Specific candidate window ID to evaluate")
+    judge_parser.add_argument("--top-k", type=int, default=10, help="Evaluate top-K candidates (default: 10)")
+    judge_parser.add_argument("--provider", choices=["local-qwen", "mock"], default="local-qwen", help="Inference provider (default: local-qwen)")
+    judge_parser.add_argument("--config", type=Path, default=Path("judge.yaml"), help="Path to judge.yaml")
+    judge_parser.add_argument("--force", action="store_true", help="Force re-evaluation of already judged candidates")
+    judge_parser.add_argument("--max-frames", type=int, default=8, help="Maximum visual frames to sample (default: 8)")
+    judge_parser.add_argument("--cpu", action="store_true", help="Force CPU inference fallback (n_gpu_layers=0)")
 
     args = parser.parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -127,6 +141,70 @@ def main() -> int:
         print("\n" + summary_path.read_text(encoding="utf-8"))
         print(f"Artifacts saved:\n - JSON: {json_path}\n - CSV:  {csv_path}\n - MD:   {summary_path}\n")
         return 0
+
+    elif args.command == "judge":
+        import yaml
+
+        if not args.out.is_dir():
+            LOGGER.error("VOD output directory not found: %s", args.out)
+            return 1
+
+        if args.provider == "mock":
+            provider = MockHighlightJudgeProvider()
+        else:
+            cfg_dict = {}
+            if args.config.is_file():
+                try:
+                    loaded = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+                    cfg_dict = loaded.get("judge", {}) if isinstance(loaded, dict) else {}
+                except Exception as exc:
+                    LOGGER.warning("Could not parse config %s: %s", args.config, exc)
+
+            qwen_cfg = QwenProviderConfig(
+                model_path=Path(cfg_dict.get("model_path", "D:/models/qwen2.5-vl-7b-gguf/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf")),
+                projector_path=Path(cfg_dict.get("projector_path", "D:/models/qwen2.5-vl-7b-gguf/mmproj-Qwen2.5-VL-7B-Instruct-Q8_0.gguf")),
+                server_binary=Path(cfg_dict.get("server_binary", "D:/tools/llama.cpp/llama-server.exe")),
+                endpoint_url=cfg_dict.get("endpoint_url", "http://127.0.0.1:8080/v1"),
+                n_gpu_layers=0 if args.cpu else int(cfg_dict.get("n_gpu_layers", 99)),
+                n_ctx=int(cfg_dict.get("n_ctx", 6144)),
+                max_output_tokens=int(cfg_dict.get("max_output_tokens", 1024)),
+                temperature=float(cfg_dict.get("temperature", 0.1)),
+                timeout_seconds=float(cfg_dict.get("timeout_seconds", 60.0)),
+                max_frames=args.max_frames or int(cfg_dict.get("max_frames", 8)),
+                auto_start_server=bool(cfg_dict.get("auto_start_server", True)),
+            )
+            provider = QwenVisionLanguageProvider(config=qwen_cfg)
+
+        try:
+            records, csv_path = judge_candidates(
+                vod_dir=args.out,
+                provider=provider,
+                candidate_id=args.candidate_id,
+                top_k=args.top_k,
+                force=args.force,
+                max_frames=args.max_frames,
+            )
+            print(f"\nEvaluated {len(records)} candidate(s) with provider '{provider.model_name}'.")
+            print(f"Dual-ranked comparison exported to: {csv_path}\n")
+
+            print(f"{'Sig Rank':<9} {'AI Rank':<8} {'Candidate ID':<26} {'Rating':<7} {'Category':<14} {'Confidence':<11} {'Status'}")
+            print("-" * 85)
+            with csv_path.open(encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    sig_r = f"#{row['signal_rank']}"
+                    ai_r = f"#{row['ai_rank']}"
+                    c_id = row['candidate_id'][:24]
+                    rating = f"{row['ai_editorial_rating']}/5"
+                    cat = row['ai_category']
+                    conf = f"{float(row['ai_confidence'])*100:.1f}%"
+                    stat = "APPROVED" if row['ai_approved'] == 'y' else f"REJECTED ({row['ai_rejection_reason'][:20]})"
+                    print(f"{sig_r:<9} {ai_r:<8} {c_id:<26} {rating:<7} {cat:<14} {conf:<11} {stat}")
+            print()
+            return 0
+        finally:
+            if hasattr(provider, "close"):
+                provider.close()
 
     return 0
 

@@ -1,0 +1,44 @@
+{
+  "4_frames_gpu": {
+    "num_frames": 4,
+    "latency_seconds": 8.273,
+    "prompt_tokens": 1884,
+    "completion_tokens": 316,
+    "tokens_per_second": 38.25,
+    "vram_used_mb": 7423.0,
+    "vram_free_mb": 526.0,
+    "system_ram_mb": 120.4,
+    "rating": 1,
+    "category": "ordinary",
+    "summary": "A series of static test pattern frames with no discernible action or dialogue.",
+    "evidence_count": 4
+  },
+  "8_frames_gpu": {
+    "num_frames": 8,
+    "latency_seconds": 10.269,
+    "prompt_tokens": 3149,
+    "completion_tokens": 415,
+    "tokens_per_second": 40.43,
+    "vram_used_mb": 7428.0,
+    "vram_free_mb": 521.0,
+    "system_ram_mb": 121.7,
+    "rating": 1,
+    "category": "ordinary",
+    "summary": "A series of static frames showing a test pattern with moving lines.",
+    "evidence_count": 8
+  },
+  "12_frames_gpu": {
+    "num_frames": 12,
+    "latency_seconds": 13.147,
+    "prompt_tokens": 4102,
+    "completion_tokens": 518,
+    "tokens_per_second": 39.42,
+    "vram_used_mb": 7427.0,
+    "vram_free_mb": 522.0,
+    "system_ram_mb": 122.9,
+    "rating": 1,
+    "category": "ordinary",
+    "summary": "A series of static frames showing a test pattern with moving lines.",
+    "evidence_count": 11
+  }
+}

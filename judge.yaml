@@ -1,0 +1,42 @@
+# StreamClip AI — Stage 4B AI Highlight Judge Configuration
+
+judge:
+  # Provider type: 'local-qwen' or 'mock'
+  provider: "local-qwen"
+
+  # Model metadata
+  model_name: "Qwen2.5-VL-7B-Instruct-Q4_K_M"
+  model_repo: "ggml-org/Qwen2.5-VL-7B-Instruct-GGUF"
+  quantization: "Q4_K_M"
+  license: "Apache-2.0"
+
+  # Local paths (outside git repository)
+  model_path: "D:/models/qwen2.5-vl-7b-gguf/Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"
+  projector_path: "D:/models/qwen2.5-vl-7b-gguf/mmproj-Qwen2.5-VL-7B-Instruct-Q8_0.gguf"
+  server_binary: "D:/tools/llama.cpp/llama-server.exe"
+
+  # Runtime server endpoint
+  host: "127.0.0.1"
+  port: 8080
+  endpoint_url: "http://127.0.0.1:8080/v1"
+
+  # Hardware acceleration
+  # 99 = full GPU offloading to NVIDIA RTX 4070; 0 = CPU fallback
+  n_gpu_layers: 99
+  gpu_device_id: 0
+
+  # Inference parameters
+  n_ctx: 6144
+  max_output_tokens: 1024
+  temperature: 0.1
+  timeout_seconds: 60.0
+
+  # Multimodal context configuration
+  max_frames: 8             # Default 8 frames; benchmarked at 4, 8, 12 frames
+  frame_max_width: 640
+  frame_max_height: 360
+
+  # Robustness & retry policy
+  max_retries: 2
+  retry_delay_seconds: 1.0
+  auto_start_server: true    # Automatically launch llama-server.exe if not running

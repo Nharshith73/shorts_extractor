@@ -1,0 +1,12 @@
+{
+  "device": "cpu",
+  "cpu_model": "Intel Core i9-14900HX (24 cores / 32 threads)",
+  "num_frames": 4,
+  "latency_seconds": 44.365,
+  "prompt_tokens": 1884,
+  "completion_tokens": 300,
+  "tokens_per_second": 6.76,
+  "rating": 1,
+  "category": "ordinary",
+  "summary": "The video displays a series of static test patterns with no discernible action or dialogue."
+}
