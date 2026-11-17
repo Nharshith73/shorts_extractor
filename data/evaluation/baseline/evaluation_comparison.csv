@@ -1,0 +1,4 @@
+candidate_rank,candidate_window_id,candidate_start,candidate_end,candidate_score,matched_sample_id,label_start,label_end,label_category,label_rating,label_approved,iou,match_status
+1,2aae2654e2ecfe1a8dc53ede,0.0,15.0,5.8637338855422145,eval_source_v_b7ded4a3bd53cd63a673,0.0,12.0,chaotic,4,y,0.8,true_positive
+2,85d72242df9a02dfb6500681,35.0,50.0,5.474750928481516,eval_source_v_981d6b53c1fc44bd76d1,40.0,48.0,fail,3,y,0.5333,true_positive
+3,92faefe56fc3015494b12949,19.0,34.0,5.2462439792687015,eval_source_v_a947905eb0c87df0ce8e,25.0,32.0,impressive,5,y,0.4667,true_positive

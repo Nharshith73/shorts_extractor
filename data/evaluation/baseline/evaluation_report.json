@@ -1,0 +1,90 @@
+{
+  "total_candidates": 3,
+  "total_ground_truth_labels": 5,
+  "approved_ground_truth_labels": 3,
+  "top_k": 3,
+  "precision_at_k": 1.0,
+  "recall_at_k": 1.0,
+  "weighted_recall_at_k": 1.0,
+  "approval_rate_at_k": 1.0,
+  "mean_iou": 0.6,
+  "median_iou": 0.5333,
+  "duplicate_rate": 0.0,
+  "category_metrics": {
+    "chaotic": {
+      "ground_truth_count": 1,
+      "matched_count": 1,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "fail": {
+      "ground_truth_count": 1,
+      "matched_count": 1,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "impressive": {
+      "ground_truth_count": 1,
+      "matched_count": 1,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "ordinary": {
+      "ground_truth_count": 0,
+      "matched_count": 0,
+      "precision": 0.0,
+      "recall": 0.0
+    }
+  },
+  "rejection_reasons": {},
+  "matches": [
+    {
+      "candidate_rank": 1,
+      "candidate_window_id": "2aae2654e2ecfe1a8dc53ede",
+      "candidate_start": 0.0,
+      "candidate_end": 15.0,
+      "candidate_score": 5.8637338855422145,
+      "matched_sample_id": "eval_source_v_b7ded4a3bd53cd63a673",
+      "label_start": 0.0,
+      "label_end": 12.0,
+      "label_category": "chaotic",
+      "label_rating": 4,
+      "label_approved": "y",
+      "iou": 0.8,
+      "match_status": "true_positive"
+    },
+    {
+      "candidate_rank": 2,
+      "candidate_window_id": "85d72242df9a02dfb6500681",
+      "candidate_start": 35.0,
+      "candidate_end": 50.0,
+      "candidate_score": 5.474750928481516,
+      "matched_sample_id": "eval_source_v_981d6b53c1fc44bd76d1",
+      "label_start": 40.0,
+      "label_end": 48.0,
+      "label_category": "fail",
+      "label_rating": 3,
+      "label_approved": "y",
+      "iou": 0.5333,
+      "match_status": "true_positive"
+    },
+    {
+      "candidate_rank": 3,
+      "candidate_window_id": "92faefe56fc3015494b12949",
+      "candidate_start": 19.0,
+      "candidate_end": 34.0,
+      "candidate_score": 5.2462439792687015,
+      "matched_sample_id": "eval_source_v_a947905eb0c87df0ce8e",
+      "label_start": 25.0,
+      "label_end": 32.0,
+      "label_category": "impressive",
+      "label_rating": 5,
+      "label_approved": "y",
+      "iou": 0.4667,
+      "match_status": "true_positive"
+    }
+  ],
+  "unmatched_labels": [],
+  "is_synthetic": true,
+  "evaluated_at": "2026-11-17T15:34:08.816356+00:00"
+}

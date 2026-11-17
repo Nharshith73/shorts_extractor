@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-11-17T15:32:58.674290+00:00",
+  "total_samples": 5,
+  "human_samples": 0,
+  "synthetic_samples": 5,
+  "samples": {
+    "eval_source_v_71b72055a18cca1f3e5a": {
+      "sample_id": "eval_source_v_71b72055a18cca1f3e5a",
+      "source_fingerprint": {
+        "path": "D:\\clipsgta\\shorts_extractor\\data\\synthetic_vod\\source_vod.mp4",
+        "size": 44081259,
+        "mtime_ns": 1794928598179554000
+      },
+      "source_id": "source_vod",
+      "start_seconds": 50.0,
+      "end_seconds": 58.0,
+      "event_category": "ordinary",
+      "editorial_rating": 1,
+      "context_completeness": true,
+      "setup_presence": false,
+      "payoff_presence": false,
+      "approved": "n",
+      "rejection_reason": "Low intensity transit with no payoff",
+      "notes": "Ordinary straight driving",
+      "annotation_version": 1,
+      "is_synthetic": true,
+      "created_at": "2026-11-17T15:32:52.374785+00:00",
+      "updated_at": "2026-11-17T15:32:52.374796+00:00",
+      "history": []
+    },
+    "eval_source_v_76b5ee1a163704cf778a": {
+      "sample_id": "eval_source_v_76b5ee1a163704cf778a",
+      "source_fingerprint": {
+        "path": "D:\\clipsgta\\shorts_extractor\\data\\synthetic_vod\\source_vod.mp4",
+        "size": 44081259,
+        "mtime_ns": 1794928598179554000
+      },
+      "source_id": "source_vod",
+      "start_seconds": 13.0,
+      "end_seconds": 18.0,
+      "event_category": "ordinary",
+      "editorial_rating": 0,
+      "context_completeness": true,
+      "setup_presence": false,
+      "payoff_presence": false,
+      "approved": "n",
+      "rejection_reason": "Dead air static sequence",
+      "notes": "Dead air transition",
+      "annotation_version": 1,
+      "is_synthetic": true,
+      "created_at": "2026-11-17T15:32:58.674139+00:00",
+      "updated_at": "2026-11-17T15:32:58.674149+00:00",
+      "history": []
+    },
+    "eval_source_v_981d6b53c1fc44bd76d1": {
+      "sample_id": "eval_source_v_981d6b53c1fc44bd76d1",
+      "source_fingerprint": {
+        "path": "D:\\clipsgta\\shorts_extractor\\data\\synthetic_vod\\source_vod.mp4",
+        "size": 44081259,
+        "mtime_ns": 1794928598179554000
+      },
+      "source_id": "source_vod",
+      "start_seconds": 40.0,
+      "end_seconds": 48.0,
+      "event_category": "fail",
+      "editorial_rating": 3,
+      "context_completeness": true,
+      "setup_presence": true,
+      "payoff_presence": true,
+      "approved": "y",
+      "rejection_reason": "",
+      "notes": "Vehicle collision fail",
+      "annotation_version": 1,
+      "is_synthetic": true,
+      "created_at": "2026-11-17T15:32:43.101066+00:00",
+      "updated_at": "2026-11-17T15:32:43.101077+00:00",
+      "history": []
+    },
+    "eval_source_v_a947905eb0c87df0ce8e": {
+      "sample_id": "eval_source_v_a947905eb0c87df0ce8e",
+      "source_fingerprint": {
+        "path": "D:\\clipsgta\\shorts_extractor\\data\\synthetic_vod\\source_vod.mp4",
+        "size": 44081259,
+        "mtime_ns": 1794928598179554000
+      },
+      "source_id": "source_vod",
+      "start_seconds": 25.0,
+      "end_seconds": 32.0,
+      "event_category": "impressive",
+      "editorial_rating": 5,
+      "context_completeness": true,
+      "setup_presence": true,
+      "payoff_presence": true,
+      "approved": "y",
+      "rejection_reason": "",
+      "notes": "Skillful vehicle maneuver",
+      "annotation_version": 1,
+      "is_synthetic": true,
+      "created_at": "2026-11-17T15:32:34.777698+00:00",
+      "updated_at": "2026-11-17T15:32:34.777709+00:00",
+      "history": []
+    },
+    "eval_source_v_b7ded4a3bd53cd63a673": {
+      "sample_id": "eval_source_v_b7ded4a3bd53cd63a673",
+      "source_fingerprint": {
+        "path": "D:\\clipsgta\\shorts_extractor\\data\\synthetic_vod\\source_vod.mp4",
+        "size": 44081259,
+        "mtime_ns": 1794928598179554000
+      },
+      "source_id": "source_vod",
+      "start_seconds": 0.0,
+      "end_seconds": 12.0,
+      "event_category": "chaotic",
+      "editorial_rating": 4,
+      "context_completeness": true,
+      "setup_presence": true,
+      "payoff_presence": true,
+      "approved": "y",
+      "rejection_reason": "",
+      "notes": "Opening high-action sequence",
+      "annotation_version": 1,
+      "is_synthetic": true,
+      "created_at": "2026-11-17T15:32:28.291264+00:00",
+      "updated_at": "2026-11-17T15:32:28.291277+00:00",
+      "history": []
+    }
+  }
+}
