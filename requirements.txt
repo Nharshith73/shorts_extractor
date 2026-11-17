@@ -4,3 +4,4 @@ numpy>=2.0
 scipy>=1.14
 faster-whisper==1.2.1
 ctranslate2>=4.9.0,<5
+av>=11,<14

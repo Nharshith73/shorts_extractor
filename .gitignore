@@ -10,4 +10,5 @@ data/candidates/
 data/vod-benchmark/
 data/render-preflight/
 data/render-benchmark/
+data/synthetic_vod/
 .codex-deps/

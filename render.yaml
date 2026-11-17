@@ -1,6 +1,6 @@
 # Dedicated rendering config: capture keeps using config.yaml unchanged.
 render:
-  whisper_model: 'E:\models\faster-whisper-small'
+  whisper_model: small
   compute_type: int8
   device: cpu
   language: auto

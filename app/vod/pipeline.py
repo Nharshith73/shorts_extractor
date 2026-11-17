@@ -94,9 +94,9 @@ def make_render_provenance(
     return {
         "render_version": render_version,
         "source_fingerprint": source_fingerprint,
-        "start_seconds": round(left, 6),
-        "end_seconds": round(right, 6),
-        "duration_seconds": round(right - left, 6),
+        "start_seconds": round(float(left), 6),
+        "end_seconds": round(float(right), 6),
+        "duration_seconds": round(float(right) - float(left), 6),
         "requested_encoder": requested_encoder,
         "effective_encoder": effective_encoder,
         "video_codec": effective_encoder,
@@ -110,6 +110,23 @@ def make_render_provenance(
 def make_render_cache_key(provenance: dict[str, object]) -> str:
     serialized = json.dumps(provenance, sort_keys=True, allow_nan=False)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
+
+
+def verify_clip_media_integrity(path: Path, expected_duration: float | None = None) -> bool:
+    """Verify that a cached clip exists, is non-empty, and passes ffprobe duration probing."""
+    if not path.is_file():
+        return False
+    try:
+        if path.stat().st_size <= 0:
+            return False
+        duration = probe_duration(path)
+        if duration <= 0:
+            return False
+        if expected_duration is not None and abs(duration - expected_duration) > 0.25:
+            return False
+        return True
+    except Exception:
+        return False
 
 
 def _produce(output: Path, config_path: Path, analysis: dict, features: list[FeatureBin],
@@ -160,19 +177,13 @@ def _produce(output: Path, config_path: Path, analysis: dict, features: list[Fea
             cached.get("render_cache_key") == expected_render_key
             and cached.get("provenance") == expected_provenance
         )
-        is_compatible_legacy = (
-            "render_cache_key" not in cached
-            and "provenance" not in cached
-            and cached.get("video_encoder") == effective_encoder
-            and (windows.requested_encoder in ("auto", cached.get("video_encoder")))
-        )
-        has_matching_provenance = has_modern_provenance or is_compatible_legacy
         old_file = Path(cached.get("clip_path", "."))
         reused = (
-            has_matching_provenance
+            has_modern_provenance
             and old_file.is_file()
-            and old_file.stat().st_size == cached.get("size_bytes")
             and (cached.get("size_bytes") or 0) > 0
+            and old_file.stat().st_size == cached.get("size_bytes")
+            and verify_clip_media_integrity(old_file, expected_duration=right - left)
         )
         extracted = False
         encoder = cached.get("video_encoder") if reused else None
@@ -195,6 +206,8 @@ def _produce(output: Path, config_path: Path, analysis: dict, features: list[Fea
                 extracted, encoder = True, selector.selected
             finally:
                 temporary.unlink(missing_ok=True)
+        else:
+            cache.pop(key, None)
         clip = dict(window_id=key, rank=rank, video=analysis["video"], clip_path=str(clip_path),
                     source_id=event.source_id, peak_seconds=peak, start_seconds=left, end_seconds=right,
                     actual_pre_roll_seconds=peak-left, actual_post_roll_seconds=right-peak,

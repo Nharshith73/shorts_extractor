@@ -46,6 +46,10 @@ class RenderConfig:
     def validate(self) -> None:
         if not self.whisper_model or not self.compute_type or not self.language:
             raise ValueError("render model, compute_type and language cannot be empty")
+        p = Path(self.whisper_model)
+        if p.is_absolute() or self.whisper_model.startswith((".", "/", "\\")) or ("\\" in self.whisper_model):
+            if not p.is_dir():
+                raise FileNotFoundError(f"configured whisper_model directory does not exist: {self.whisper_model}")
         if self.device not in ("cpu", "auto", "cuda"):
             raise ValueError("render.device must be cpu, auto, or cuda")
         if self.caption_style not in ("bold_yellow", "clean_white", "boxed"):
@@ -102,7 +106,26 @@ def load_render_config(path: Path) -> RenderConfig:
         section["facecam_region"] = FacecamRegion(**region)
     if "fonts_dir" in section:
         fonts = Path(section["fonts_dir"])
-        section["fonts_dir"] = fonts if fonts.is_absolute() else path.resolve().parent / fonts
+        section["fonts_dir"] = fonts if fonts.is_absolute() else (path.resolve().parent / fonts).resolve()
+    if "whisper_model" in section:
+        model_str = str(section["whisper_model"]).strip()
+        if not model_str:
+            raise ValueError("render model, compute_type and language cannot be empty")
+        model_path = Path(model_str)
+        is_explicit_path = (
+            model_path.is_absolute()
+            or model_str.startswith((".", "/", "\\"))
+            or ("\\" in model_str)
+            or (path.resolve().parent / model_path).is_dir()
+            or model_path.is_dir()
+        )
+        if is_explicit_path:
+            resolved_model = model_path if model_path.is_absolute() else (path.resolve().parent / model_path).resolve()
+            if not resolved_model.is_dir():
+                raise FileNotFoundError(f"configured whisper_model directory does not exist: {model_str}")
+            section["whisper_model"] = str(resolved_model)
+        else:
+            section["whisper_model"] = model_str
     config = RenderConfig(**section)
     config.validate()
     return config

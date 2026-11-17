@@ -400,7 +400,22 @@ The default `--config config.yaml` uses rendering defaults and inherits `candida
 
 Each final is cut frame-accurately from the **original source file** using the sidecar's media start/end, avoiding another generation of preview compression. The original must remain available. Output is `<out>/final/<preview-name>.mp4`, with a JSON settings/timing sidecar and an ASS file when captioned. Previews, review decisions, detection features and selection are preserved. `render-report.json` reports failures and throughput; the command returns nonzero if any selected export fails. Successful outputs replace prior exports only after media validation.
 
-Speech recognition uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on a temporary 16 kHz mono WAV containing only the selected clip. The first captioned run can download the selected model; later runs use the model cache. Default CPU int8 needs no CUDA. No model is downloaded for a selection with no approved clips or with captions disabled. Raw transcripts are cached in `<out>/.transcripts/`, keyed by source fingerprint, source window, model/language/device/compute settings and package versions. Changing caption style, layout, or hallucination thresholds reuses recognition results; changing the source or ASR settings creates a new cache entry.
+Speech recognition uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on a temporary 16 kHz mono WAV containing only the selected clip. The first captioned run can download the selected model; later runs use the model cache. Default CPU int8 needs no CUDA. No model is downloaded for a selection with no approved clips or with captions disabled.
+
+#### Model Weight Storage and Local Model Configuration
+
+- **Downloaded Model Storage:** Faster-whisper delegates model downloads to `huggingface_hub`. Weights are cached in standard user-cache directories:
+  - **Linux / Ubuntu:** `~/.cache/huggingface/hub/`
+  - **Windows 11:** `C:\Users\<Username>\.cache\huggingface\hub\`
+  - Operators can override the download directory globally by setting the `HF_HOME` environment variable (e.g., `export HF_HOME=/opt/models/huggingface` or `$env:HF_HOME = 'D:\models\huggingface'`).
+- **Configuring a Local Model:** Instead of downloading from Hugging Face, operators can configure `whisper_model` to point to a local directory:
+  ```yaml
+  render:
+    whisper_model: models/faster-whisper-small  # or /opt/models/faster-whisper-small
+  ```
+  The target directory must contain standard CTranslate2 model files (`model.bin`, `config.json`, `vocabulary.json` / `tokenizer.json`). Both relative paths (resolved relative to `render.yaml`) and absolute paths are supported across Windows and Ubuntu, including paths with spaces. If an explicit local path is configured but does not exist on disk, a clear `FileNotFoundError` is raised immediately before processing starts.
+
+Raw transcripts are cached in `<out>/.transcripts/`, keyed by source fingerprint, source window, model/language/device/compute settings and package versions. Changing caption style, layout, or hallucination thresholds reuses recognition results; changing the source or ASR settings creates a new cache entry.
 
 | `render:` setting | Default / meaning |
 | --- | --- |

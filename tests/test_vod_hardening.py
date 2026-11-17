@@ -78,14 +78,23 @@ def test_rescore_never_decodes_and_reuses_unchanged_windows(tmp_path: Path, monk
         raise AssertionError("rescore must not decode or render")
     monkeypatch.setattr("app.vod.pipeline.extract_chunked", forbidden)
     monkeypatch.setattr("app.vod.pipeline.render_cut", forbidden)
+    monkeypatch.setattr("app.vod.pipeline.probe_duration", lambda p: 15.0)
     rescore(tmp_path, config)
     clips = json.loads((tmp_path / "clips.json").read_text())
     assert len(clips) == 3 and not any(clip["extracted"] for clip in clips)
+    from app.vod.pipeline import make_render_cache_key, make_render_provenance
     cache = {}
     for clip in clips:
         path = Path(clip["clip_path"])
         path.write_bytes(b"cached video")
-        cache[clip["window_id"]] = dict(clip_path=str(path), size_bytes=path.stat().st_size, video_encoder="libx264")
+        prov = make_render_provenance({}, clip["start_seconds"], clip["end_seconds"], "libx264", "libx264")
+        cache[clip["window_id"]] = dict(
+            clip_path=str(path),
+            size_bytes=path.stat().st_size,
+            video_encoder="libx264",
+            render_cache_key=make_render_cache_key(prov),
+            provenance=prov,
+        )
     write_json(tmp_path / "clip_cache.json", cache)
     rescore(tmp_path, config)
     assert all(clip["reused"] for clip in json.loads((tmp_path / "clips.json").read_text()))
