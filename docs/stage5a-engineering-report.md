@@ -1,0 +1,17 @@
+# Stage 5A engineering report
+
+## Audit and integration
+
+Recorded video is the primary workflow. The live implementation remains available but is paused as a product priority. Existing `app.vod.run` performs chunked signal extraction, ranking, and preview cuts. `app.evaluation.judge` creates contexts and runs the configured Qwen provider; `app.vod.render` produces final exports using the original source, word-timed Whisper captions, configured layouts, loudness normalization, and export probing. Previously these were separate commands. The new `app.video` entry point connects these APIs; it does not implement video downloading, live ingestion, or publishing.
+
+The queue stores full-file SHA-256 identities, job state, attempts and history in SQLite. A machine-local OS worker lock serializes all production jobs, including inference and rendering. Source files stay in place. The default final encoder is CPU x264 to reduce contention with the loaded Qwen server; `--encoder` and `--cpu` provide explicit alternatives. `process --all` discovers supported inbox files and processes queued jobs. `retry` and `rejudge` queue work for the next `process --all`. Use `--creator`, `--source-url`, and `--authorization` with `process --input` to record provenance. A source URL is provenance only; only local files are accepted as media. Render styling is controlled in `render.yaml`.
+
+Analysis and contexts are retained under `data/processing`, with configuration hashes used for invalidation. Final results and attribution metadata are under `data/completed/<source_id>`. The selection threshold defaults to four out of five, complete context, a maximum of three clips, and overlap suppression. Signal scores remain intact. The report records elapsed stage times and throughput, not a synthetic estimate of hardware performance.
+
+## Verification and outstanding work
+
+This implementation has not yet passed an end-to-end test. The available Python 3.15 environment lacks SciPy; the local cached wheel is for Python 3.13. The existing test suite consequently fails during collection. A real-model test and 5/15/30/60-minute GTA benchmarks have not been run. Peak VRAM, separate detection and transcription timings, storage consumption, and a synthetic benchmark are not yet reported by the new orchestrator.
+
+Recovery, cache validity, multi-format validation, final media integrity, transcript alignment, AI selection, and automated rendering still require end-to-end tests. The existing VOD decoder requires an audio stream even though the final renderer supports silent media. Full-file validation and candidate context extraction decode media separately; this is not a single-decode pipeline. The provider stays resident across jobs, while rendering defaults to CPU; GPU inference and a user-selected NVENC render do not run concurrently, but Qwen remains resident in VRAM. Concurrency is intentionally limited to one worker and is not configurable. Direct-media URL acquisition is not implemented. Retry and rejudge require a subsequent process command, and the queue has no cancellation command or timed retry backoff. Model, render and transcript cache provenance needs further verification. AI recommended boundary changes are recorded in judgments but are not applied to final exports. Reprocessing can leave older shorts or metadata in the completed directory when the selection changes; use the current shortlist to identify the latest selection. Live product documentation beyond this report has not been changed.
+
+**STAGE 5A NOT READY**

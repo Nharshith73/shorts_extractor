@@ -1,4 +1,5 @@
 .venv/
+.conda-env/
 __pycache__/
 .pytest_cache/
 *.py[cod]
@@ -20,3 +21,10 @@ data/live_shorts/
 *.sqlite3-wal
 *.sqlite3-shm
 .codex-deps/
+data/inbox/
+data/processing/
+data/completed/
+data/failed/
+scratch/
+data/.*.lock
+*.lock

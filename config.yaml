@@ -17,11 +17,11 @@ detection:
   video_fps: 4
   reprocess_poll_seconds: 2.0
   weights:
-    audio_rms_db: 1.0
-    voice_energy_db: 1.0
-    onset_strength: 1.0
-    motion: 1.0
-    cut_change: 1.0
+    audio_rms_db: 2.0
+    voice_energy_db: 2.5
+    onset_strength: 1.5
+    motion: 0.4
+    cut_change: 0.3
   relative_scale_floor: 0.01
   scale_floors:
     audio_rms_db: 0.5

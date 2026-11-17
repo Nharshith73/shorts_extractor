@@ -321,6 +321,7 @@ class QwenVisionLanguageProvider:
             "   - 'inference': Your own deductive interpretation.\n"
             "2. Never fabricate dialogue, spoken words, or player speech not in the transcript.\n"
             "3. If nothing exciting occurs, assign a low rating (0-2) and state the rejection reason.\n"
+            "All timestamps, including recommended boundaries, are absolute seconds from the start of the source video, never clip-relative offsets.\n"
             "4. Output MUST be a strictly valid JSON object matching this schema:\n"
             "{\n"
             '  "schema_version": "1.0",\n'
@@ -346,8 +347,12 @@ class QwenVisionLanguageProvider:
 
         user_content: list[dict[str, Any]] = []
 
-        # 1. Textual contextual overview
-        transcript_text = " ".join(s.text for s in context.speech.segments) if context.speech.has_speech else "(No dialogue detected)"
+        # 1. Textual contextual overview (filter out low-confidence hallucinations)
+        valid_segments = [
+            s for s in context.speech.segments
+            if s.avg_logprob >= -1.2 and s.no_speech_prob <= 0.65
+        ] if context.speech.has_speech else []
+        transcript_text = " ".join(s.text for s in valid_segments) if valid_segments else "(No dialogue detected)"
         chat_summary = (
             f"Chat present: {context.chat.message_count} messages, "
             f"{context.chat.unique_chatters} chatters, emote density: {context.chat.emote_density:.2f}"
@@ -371,14 +376,18 @@ class QwenVisionLanguageProvider:
         frames_to_send = context.frames[: self.config.max_frames]
         for f in frames_to_send:
             f_path = Path(f.frame_path)
-            # Handle relative vs absolute frame paths
+            # Handle relative vs absolute frame paths across processing, completed, and artifacts dirs
             if not f_path.is_file():
+                fname = f_path.name
                 search_candidates = [
-                    Path("data/synthetic_vod/output/context") / context.candidate_id / "frames" / f_path.name,
-                    Path("data/synthetic_vod/output/context") / context.candidate_id / f_path.name,
-                    Path("artifacts/context") / context.candidate_id / "frames" / f_path.name,
-                    Path("artifacts/context") / context.candidate_id / f_path.name,
+                    Path("data/synthetic_vod/output/context") / context.candidate_id / "frames" / fname,
+                    Path("data/synthetic_vod/output/context") / context.candidate_id / fname,
+                    Path("artifacts/context") / context.candidate_id / "frames" / fname,
+                    Path("artifacts/context") / context.candidate_id / fname,
                 ]
+                # Search active processing runs
+                search_candidates.extend(list(Path("data/processing").glob(f"*/context/{context.candidate_id}/frames/{fname}")))
+                search_candidates.extend(list(Path("data/completed").glob(f"*/runs/*/contexts/{context.candidate_id}/frames/{fname}")))
                 for sc in search_candidates:
                     if sc.is_file():
                         f_path = sc
