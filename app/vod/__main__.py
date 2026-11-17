@@ -29,6 +29,13 @@ def main() -> int:
     summary_parser.add_argument("--out", type=Path, required=True)
     review_parser = commands.add_parser("review")
     review_parser.add_argument("--out", type=Path, required=True)
+    render_parser = commands.add_parser("render", help="Render reviewed clips as captioned vertical Shorts")
+    render_parser.add_argument("--out", type=Path, required=True)
+    render_parser.add_argument("--config", type=Path, default=Path("config.yaml"))
+    from .render import parse_ranks
+    render_selection = render_parser.add_mutually_exclusive_group()
+    render_selection.add_argument("--all", action="store_true", help="Render all reviewed preview rows")
+    render_selection.add_argument("--ranks", type=parse_ranks, help="Render these ranks regardless of approval, e.g. 1,3,5")
     evaluation = commands.add_parser("evaluate")
     evaluation.add_argument("--out", type=Path, required=True)
     evaluation.add_argument("--labels", type=Path, required=True)
@@ -45,6 +52,10 @@ def main() -> int:
             summary(args.out)
         elif args.command == "review":
             review(args.out)
+        elif args.command == "render":
+            from .render import render_reviewed
+            report = render_reviewed(args.out, args.config, all_clips=args.all, ranks=args.ranks)
+            return 2 if report["failed"] else 0
         else:
             evaluate(args.out, args.labels, args.tolerance, args.top_k)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:

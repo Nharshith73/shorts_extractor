@@ -2,7 +2,7 @@
 
 **Turn livestream highlights into engaging vertical Shorts—locally, with zero paid LLM API calls.**
 
-> **Status:** Stages 1–3 and offline VOD mode are implemented. Later AI judging, vertical editing, dashboard, and publishing stages remain planned.
+> **Status:** Stages 1–3, offline VOD mode, and reviewed-clip vertical rendering with captions are implemented. Local AI judging, a full dashboard, and publishing remain planned.
 
 StreamClip AI is a proposed Python-first pipeline for monitoring gameplay livestreams (initially GTA 6), finding exciting moments, evaluating candidate clips with a **local vision-language model**, and automatically editing selected moments into vertical videos for YouTube Shorts, Instagram Reels, and TikTok.
 
@@ -383,6 +383,55 @@ python -m pytest -v -rs
 ```
 
 Media buffers are bounded by chunk_seconds; feature rows are retained for scoring. Chat JSON is still loaded as a whole, so large exports can dominate memory. Memory reports are sampled process-tree peaks, not exact allocation maxima. A ten-minute benchmark does not guarantee performance for other codecs, resolutions, hardware or clip counts. Below-threshold ranking deliberately favors a reviewable shortlist over guaranteed excitement.
+
+## Running render
+
+Final rendering reads the current `review.csv` and each preview's JSON sidecar. By default only rows with `approved == y` are rendered. An explicit rank selection overrides approval; `--all` selects every current review row. `--all` and `--ranks` are mutually exclusive.
+
+```powershell
+python -m pip install --only-binary=:all: -r requirements.txt
+python -m app.vod render --out data\vod-gameplay
+python -m app.vod render --out data\vod-gameplay --config render.yaml
+python -m app.vod render --out data\vod-gameplay --ranks 1,3,5 --config render.yaml
+python -m app.vod render --out data\vod-gameplay --all --config render.yaml
+```
+
+The default `--config config.yaml` uses rendering defaults and inherits `candidates.encoder`. Customize the dedicated `render.yaml`, which contains all `render:` keys. Keep using `config.yaml` for ingestion: its strict top-level schema is unchanged, and a render-only config is not an ingestion config.
+
+Each final is cut frame-accurately from the **original source file** using the sidecar's media start/end, avoiding another generation of preview compression. The original must remain available. Output is `<out>/final/<preview-name>.mp4`, with a JSON settings/timing sidecar and an ASS file when captioned. Previews, review decisions, detection features and selection are preserved. `render-report.json` reports failures and throughput; the command returns nonzero if any selected export fails. Successful outputs replace prior exports only after media validation.
+
+Speech recognition uses [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on a temporary 16 kHz mono WAV containing only the selected clip. The first captioned run can download the selected model; later runs use the model cache. Default CPU int8 needs no CUDA. No model is downloaded for a selection with no approved clips or with captions disabled. Raw transcripts are cached in `<out>/.transcripts/`, keyed by source fingerprint, source window, model/language/device/compute settings and package versions. Changing caption style, layout, or hallucination thresholds reuses recognition results; changing the source or ASR settings creates a new cache entry.
+
+| `render:` setting | Default / meaning |
+| --- | --- |
+| `whisper_model` | `small`; model name or local model directory |
+| `compute_type`, `device`, `language` | `int8`, `cpu`, `auto`; devices also accept `auto` and `cuda` |
+| `min_avg_logprob`, `max_no_speech_prob` | `-1.0`, `0.6`; reject a segment if either check fails |
+| `captions_enabled`, `caption_style` | `true`, `bold_yellow`; other styles are `clean_white` and `boxed` |
+| `uppercase`, `max_words`, `font_size` | `true`, `3`, `80`; 1–3 visible words per phrase |
+| `margin_horizontal`, `margin_bottom` | `80`, `400` pixels; validation protects the bottom 18% UI area |
+| `outline`, `shadow`, `fonts_dir` | `4`, `2`, `assets/fonts`; relative font paths resolve beside the config |
+| `layout` | `blurred_background`; also `stacked` or `center_crop` |
+| `facecam_region` | `null`; otherwise `{x, y, w, h}` in original-source pixels |
+| `crop_center_x` | `0.5`; horizontal source center fraction, 0–1 |
+| `target_lufs` | `-14`; single-pass loudnorm with -1.5 dBTP and LRA 11 |
+| `encoder`, `crf`, `preset` | `auto`, `18`, `medium`; auto reuses the real NVENC probe and CPU fallback |
+
+Captions use word timestamps and `vad_filter=True`, then discard suspect recognition segments. Phrase grouping considers word count, length, punctuation and pauses; discrete ASS events highlight only the current word. Caption timings are clip-relative, with original-source offsets also recorded in JSON. A clip without usable speech is still exported, with `caption_status: no_usable_speech` and no subtitles. A source without audio receives a silent AAC track and `source_has_no_audio`. The sidecar records rejected segment count, cache reuse, effective layout, font, encoder, caption text and word times.
+
+Put licensed Anton or Poppins-Bold TTF/OTF files in `assets/fonts` if desired; none are downloaded automatically. The fallback family is Arial Black, subject to system substitution if unavailable. Font files are staged in an explicit relative `fonts` directory. FFmpeg runs beside `captions.ass` and references `subtitles=filename=captions.ass:fontsdir=fonts`, so neither drive letters nor backslashes enter the filter. This uses libass, never drawtext.
+
+The blurred layout preserves the gameplay aspect ratio over a darkened blurred fill. Stacked uses a 1080px-high gameplay panel above an 840px-high facecam panel; gameplay retains a blurred fill and facecam fills its panel by cropping. Missing facecam coordinates cause a logged fallback to blurred background; out-of-frame coordinates fail clearly. Center crop can hide HUD/action, and a static facecam region does not track moving overlays. Final encoding is 1080×1920 at 30 fps, H.264, AAC 192k/48 kHz, and `+faststart`. NVENC uses p4/CQ instead of x264 preset/CRF. Single-pass loudness is approximate, not a measured two-pass guarantee.
+
+Run all tests normally. The real speech test is opt-in and can download the `small` model; the synthetic render tests inject fake words and need no model:
+
+```powershell
+python -m pytest -v -rs
+$env:STREAMCLIP_SPEECH_SAMPLE = 'E:\test_footage\short-speech.wav'
+python -m pytest tests\test_render_transcription.py -v -rs
+```
+
+This is a deterministic renderer with manual layout choices. It does not judge clip quality, infer facecam positions, generate hooks, track subjects, or publish. VAD and confidence filtering reduce hallucinations but cannot prove every caption is correct. Transcript caches and finals need manual disk-space management.
 
 ## License
 

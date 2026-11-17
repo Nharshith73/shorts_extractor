@@ -8,4 +8,6 @@ data/segments/*
 data/soak-test/
 data/candidates/
 data/vod-benchmark/
+data/render-preflight/
+data/render-benchmark/
 .codex-deps/
