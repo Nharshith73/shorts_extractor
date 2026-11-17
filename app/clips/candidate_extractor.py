@@ -73,6 +73,18 @@ class CandidateExtractor:
         boundaries = self.buffer.get_discontinuities(window.start, window.end)
         return trim_gaps(window, boundaries, records)
 
+    def _validate_binaries(self) -> None:
+        import shutil
+        missing = [
+            name
+            for name in (self.ffmpeg, self.ffprobe)
+            if shutil.which(name) is None and not Path(name).is_file()
+        ]
+        if missing:
+            raise RuntimeError(
+                f"Required executable(s) were not found on PATH: {', '.join(missing)}"
+            )
+
     def run_once(self, now: datetime | None = None) -> list[Candidate]:
         current = now or utc_now()
         with worker_lock(self.buffer.segments_dir / ".candidates.lock"):
@@ -119,6 +131,7 @@ class CandidateExtractor:
             self.store.update(candidate.id, "failed", window=window, error=str(exc))
 
     def _export(self, candidate_id: str, window: Window) -> Path:
+        self._validate_binaries()
         records = self.buffer.get_segments(window.start, window.end,
                                            source_id=window.primary.source_id, session_id=window.primary.session_id)
         if not records:

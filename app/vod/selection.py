@@ -10,6 +10,26 @@ from .settings import SelectionConfig
 from .timeline import media_seconds, media_time
 
 
+def canonical_ranking_key(
+    score: float,
+    unclipped_score: float | None,
+    time_seconds: float,
+) -> tuple[float, float, float]:
+    """Single canonical ranking rule across selection and evaluation:
+    1. Highest clipped score first (-score)
+    2. Highest unclipped score second (-unclipped_score; fallback to -score if missing/non-finite)
+    3. Earliest timestamp third (time_seconds)
+    """
+    s = float(score) if math.isfinite(float(score)) else 0.0
+    u = (
+        float(unclipped_score)
+        if (unclipped_score is not None and math.isfinite(float(unclipped_score)))
+        else s
+    )
+    t = float(time_seconds) if math.isfinite(float(time_seconds)) else 0.0
+    return (-s, -u, t)
+
+
 def rule_name(item: ScoredBin, config: DetectionConfig) -> str:
     multi = sum(value >= config.z_threshold for value in item.z_scores.values()) >= 2
     single = max(item.z_scores.values(), default=0) >= config.single_feature_threshold
@@ -33,8 +53,12 @@ def rank_peaks(scored: list[ScoredBin], selection: SelectionConfig, detection: D
     budget = max(3, min(40, math.ceil(selection.clips_per_hour * (end - start) / 3600)))
     selected: list[tuple[DetectedEvent, str]] = []
     accepted_windows: list[tuple[float, float]] = []
-    for item in sorted(scored, key=lambda item: (
-        -item.score, -(item.unclipped_score if item.unclipped_score is not None else item.score), item.feature.wall_utc)):
+    for item in sorted(
+        scored,
+        key=lambda item: canonical_ranking_key(
+            item.score, item.unclipped_score, media_seconds(item.feature.wall_utc)
+        ),
+    ):
         at = media_seconds(item.feature.wall_utc)
         if at - start < detection.warmup_seconds:
             continue

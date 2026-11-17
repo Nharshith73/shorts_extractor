@@ -102,7 +102,7 @@ class SegmentManifest:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS segments (
-                    id INTEGER PRIMARY KEY,
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                     path TEXT UNIQUE,
                     wall_start_utc TEXT NOT NULL,
                     fs_created_utc TEXT NOT NULL,
@@ -137,7 +137,20 @@ class SegmentManifest:
 
     @staticmethod
     def _migrate_schema(connection: sqlite3.Connection) -> None:
-        """Upgrade a six-column Stage 1 manifest in place without dropping rows."""
+        """Upgrade a manifest in place without dropping rows or reusing IDs."""
+        # 1. Recover from interrupted migration if _segments_old exists
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "_segments_old" in tables and "segments" not in tables:
+            LOGGER.info("Resuming interrupted migration: restoring _segments_old to segments")
+            connection.execute("ALTER TABLE _segments_old RENAME TO segments")
+            tables.add("segments")
+            tables.remove("_segments_old")
+
         columns = {
             str(row["name"])
             for row in connection.execute("PRAGMA table_info(segments)").fetchall()
@@ -181,6 +194,91 @@ class SegmentManifest:
             WHERE fs_created_utc IS NULL OR fs_created_utc = ''
             """
         )
+
+        # 2. Ensure segments table enforces AUTOINCREMENT to prevent ID reuse
+        sql_row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='segments'"
+        ).fetchone()
+        has_autoincrement = (
+            sql_row is not None and "AUTOINCREMENT" in str(sql_row[0]).upper()
+        )
+        if not has_autoincrement:
+            LOGGER.info("Migrating manifest: adding AUTOINCREMENT to segments table")
+            # Collect high-water mark across segments and downstream tables
+            high_water = 0
+            for table, col in [
+                ("segments", "id"),
+                ("_segments_old", "id"),
+                ("analysis_state", "segment_id"),
+                ("features", "segment_id"),
+                ("candidate_segment_pins", "segment_id"),
+                ("segment_reservations", "segment_id"),
+            ]:
+                if table in tables:
+                    val = connection.execute(f"SELECT MAX({col}) FROM {table}").fetchone()[0]
+                    if val is not None and int(val) > high_water:
+                        high_water = int(val)
+
+            if "_segments_old" in tables:
+                connection.execute("DROP TABLE IF EXISTS _segments_old")
+
+            connection.execute("ALTER TABLE segments RENAME TO _segments_old")
+            connection.execute(
+                """
+                CREATE TABLE segments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT UNIQUE,
+                    wall_start_utc TEXT NOT NULL,
+                    fs_created_utc TEXT NOT NULL,
+                    duration REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    session_id TEXT NOT NULL,
+                    timing_reanchored INTEGER NOT NULL DEFAULT 0,
+                    UNIQUE(path)
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO segments
+                (id, path, wall_start_utc, fs_created_utc, duration, status, source_id,
+                 pinned, session_id, timing_reanchored)
+                SELECT id, path, wall_start_utc, fs_created_utc, duration, status, source_id,
+                       pinned, session_id, timing_reanchored
+                FROM _segments_old
+                """
+            )
+            connection.execute("DROP TABLE _segments_old")
+
+            # Recreate indexes
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_segments_time ON segments (wall_start_utc)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_segments_source_time ON segments (source_id, wall_start_utc)"
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_segments_path_unique ON segments (path)"
+            )
+
+            # Preserve high-water identity in sqlite_sequence
+            if high_water > 0:
+                seq_row = connection.execute(
+                    "SELECT seq FROM sqlite_sequence WHERE name = 'segments'"
+                ).fetchone()
+                if seq_row is not None:
+                    if high_water > seq_row[0]:
+                        connection.execute(
+                            "UPDATE sqlite_sequence SET seq = ? WHERE name = 'segments'",
+                            (high_water,),
+                        )
+                else:
+                    connection.execute(
+                        "INSERT INTO sqlite_sequence (name, seq) VALUES ('segments', ?)",
+                        (high_water,),
+                    )
 
     @staticmethod
     def _record(row: sqlite3.Row) -> SegmentRecord:

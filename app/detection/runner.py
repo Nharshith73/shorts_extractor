@@ -49,12 +49,38 @@ class DetectionRunner:
         if shutil.which(self.ffmpeg_binary) is None and not Path(self.ffmpeg_binary).is_file():
             raise RuntimeError(f"ffmpeg was not found: {self.ffmpeg_binary}")
 
+    def recover_dirty_sessions(self) -> int:
+        """Find and recompute derived events for any sessions marked dirty."""
+        recovered = 0
+        for source_id, session_id, revision in self.store.dirty_sessions():
+            try:
+                session_features = self.store.session_features(source_id, session_id)
+                _, events = detect_events(session_features, self.config)
+                self.store.replace_session_events(
+                    source_id, session_id, events, expected_revision=revision
+                )
+                recovered += 1
+                LOGGER.info(
+                    "Recovered dirty detection session %s/%s at revision %d (%d events)",
+                    source_id,
+                    session_id,
+                    revision,
+                    len(events),
+                )
+            except Exception:
+                LOGGER.exception("Failed to recover dirty session %s/%s", source_id, session_id)
+        return recovered
+
     def run_once(self) -> DetectionRunStats:
         """Analyze each currently complete, not-yet-analyzed segment in order."""
         self._require_ffmpeg()
         started = time.monotonic()
         footage_seconds = 0.0
         analyzed = 0
+
+        # Recover any dirty sessions left from an interrupted previous run
+        self.recover_dirty_sessions()
+
         for segment in self.store.pending_segments():
             if segment.path is None or not segment.path.is_file():
                 LOGGER.warning("Pending segment is unavailable; waiting for retry: id=%s", segment.id)
@@ -73,12 +99,17 @@ class DetectionRunner:
             except Exception:
                 LOGGER.exception("Detection failed for segment id=%s; preserving it for retry", segment.id)
                 break
-            self.store.save_features_and_mark_analyzed(segment, features)
+            revision = self.store.save_features_and_mark_analyzed(segment, features)
             session_features = self.store.session_features(segment.source_id, segment.session_id)
             _, events = detect_events(session_features, self.config)
-            self.store.replace_session_events(segment.source_id, segment.session_id, events)
+            self.store.replace_session_events(
+                segment.source_id, segment.session_id, events, expected_revision=revision
+            )
             footage_seconds += segment.duration
             analyzed += 1
+
+        # Final check if any sessions were dirtied by concurrent arrivals
+        self.recover_dirty_sessions()
         stats = DetectionRunStats(
             segments_analyzed=analyzed,
             footage_seconds=footage_seconds,

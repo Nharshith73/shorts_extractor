@@ -68,9 +68,19 @@ def render_cut(source: Path, output: Path, start_seconds: float, duration_second
     codec += ["-preset", "veryfast", "-crf", "18"] if video_encoder == "libx264" else ["-preset", "p4", "-cq", "18"]
     # Input-side accurate seeking avoids decoding the entire lead-in. This
     # remains a re-encode; FFmpeg discards preroll before the requested time.
-    subprocess.run([ffmpeg_binary, "-hide_banner", "-loglevel", "error", "-y",
-                    *_seek_input(source, start_seconds),
-                    "-t", f"{duration_seconds:.6f}",
-                    "-map", "0:v:0", "-map", "0:a:0?", *codec, "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-movflags", "+faststart", str(output)],
-                   check=True, capture_output=True, timeout=300)
+    try:
+        subprocess.run([ffmpeg_binary, "-hide_banner", "-loglevel", "error", "-y",
+                        *_seek_input(source, start_seconds),
+                        "-t", f"{duration_seconds:.6f}",
+                        "-map", "0:v:0", "-map", "0:a:0?", *codec, "-pix_fmt", "yuv420p",
+                        "-c:a", "aac", "-movflags", "+faststart", str(output)],
+                       check=True, capture_output=True, timeout=300)
+    except subprocess.CalledProcessError as exc:
+        output.unlink(missing_ok=True)
+        stderr_msg = _text(exc.stderr).strip()
+        raise RuntimeError(
+            f"FFmpeg render_cut failed with exit code {exc.returncode}: {stderr_msg}"
+        ) from exc
+    except Exception:
+        output.unlink(missing_ok=True)
+        raise

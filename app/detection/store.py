@@ -94,6 +94,19 @@ class DetectionStore:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_analysis_state (
+                    source_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    dirty INTEGER NOT NULL DEFAULT 1,
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    clean_revision INTEGER NOT NULL DEFAULT 0,
+                    updated_utc TEXT NOT NULL,
+                    PRIMARY KEY (source_id, session_id)
+                )
+                """
+            )
 
     @staticmethod
     def _segment(row: sqlite3.Row) -> SegmentRecord:
@@ -126,8 +139,8 @@ class DetectionStore:
 
     def save_features_and_mark_analyzed(
         self, segment: SegmentRecord, features: Iterable[FeatureBin]
-    ) -> None:
-        """Atomically persist all bins for a segment and mark it processed."""
+    ) -> int:
+        """Atomically persist all bins for a segment, mark it processed, and dirty the session."""
         rows = [
             (
                 segment.id,
@@ -143,6 +156,7 @@ class DetectionStore:
             )
             for feature in features
         ]
+        now = to_utc_text(utc_now())
         with self._connect() as connection:
             connection.executemany(
                 """
@@ -166,8 +180,25 @@ class DetectionStore:
                 VALUES (?, ?, ?, ?)
                 ON CONFLICT(segment_id) DO UPDATE SET analyzed_utc=excluded.analyzed_utc
                 """,
-                (segment.id, segment.source_id, segment.session_id, to_utc_text(utc_now())),
+                (segment.id, segment.source_id, segment.session_id, now),
             )
+            connection.execute(
+                """
+                INSERT INTO session_analysis_state
+                (source_id, session_id, dirty, revision, clean_revision, updated_utc)
+                VALUES (?, ?, 1, 1, 0, ?)
+                ON CONFLICT(source_id, session_id) DO UPDATE SET
+                    dirty = 1,
+                    revision = revision + 1,
+                    updated_utc = excluded.updated_utc
+                """,
+                (segment.source_id, segment.session_id, now),
+            )
+            row = connection.execute(
+                "SELECT revision FROM session_analysis_state WHERE source_id = ? AND session_id = ?",
+                (segment.source_id, segment.session_id),
+            ).fetchone()
+            return int(row[0]) if row else 1
 
     def session_features(self, source_id: str, session_id: str) -> list[FeatureBin]:
         with self._connect() as connection:
@@ -196,9 +227,13 @@ class DetectionStore:
         ]
 
     def replace_session_events(
-        self, source_id: str, session_id: str, events: Iterable[DetectedEvent]
+        self,
+        source_id: str,
+        session_id: str,
+        events: Iterable[DetectedEvent],
+        expected_revision: int | None = None,
     ) -> None:
-        """Refresh one session's derived events from its persisted raw features."""
+        """Refresh one session's derived events and atomically update clean/dirty state."""
         now = to_utc_text(utc_now())
         rows = [
             (
@@ -227,6 +262,83 @@ class DetectionStore:
                 """,
                 rows,
             )
+            if expected_revision is not None:
+                connection.execute(
+                    """
+                    UPDATE session_analysis_state
+                    SET dirty = CASE WHEN revision = ? THEN 0 ELSE 1 END,
+                        clean_revision = ?,
+                        updated_utc = ?
+                    WHERE source_id = ? AND session_id = ?
+                    """,
+                    (expected_revision, expected_revision, now, source_id, session_id),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO session_analysis_state
+                    (source_id, session_id, dirty, revision, clean_revision, updated_utc)
+                    VALUES (?, ?, 0, 1, 1, ?)
+                    ON CONFLICT(source_id, session_id) DO UPDATE SET
+                        dirty = 0,
+                        clean_revision = revision,
+                        updated_utc = excluded.updated_utc
+                    """,
+                    (source_id, session_id, now),
+                )
+
+    def dirty_sessions(self) -> list[tuple[str, str, int]]:
+        """Return (source_id, session_id, revision) for all sessions needing event derivation."""
+        now = to_utc_text(utc_now())
+        with self._connect() as connection:
+            # Seed legacy sessions present in features but missing from session_analysis_state
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO session_analysis_state
+                (source_id, session_id, dirty, revision, clean_revision, updated_utc)
+                SELECT DISTINCT f.source_id, f.session_id,
+                       CASE WHEN EXISTS (
+                           SELECT 1 FROM events e
+                           WHERE e.source_id = f.source_id AND e.session_id = f.session_id
+                       ) THEN 0 ELSE 1 END,
+                       1, 0, ?
+                FROM features f
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM session_analysis_state s
+                    WHERE s.source_id = f.source_id AND s.session_id = f.session_id
+                )
+                """,
+                (now,),
+            )
+            rows = connection.execute(
+                """
+                SELECT source_id, session_id, revision
+                FROM session_analysis_state
+                WHERE dirty = 1
+                ORDER BY updated_utc
+                """
+            ).fetchall()
+        return [(str(row["source_id"]), str(row["session_id"]), int(row["revision"])) for row in rows]
+
+    def session_state(self, source_id: str, session_id: str) -> dict[str, object] | None:
+        """Inspect the current durability state of a session for testing and diagnostics."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT dirty, revision, clean_revision, updated_utc
+                FROM session_analysis_state
+                WHERE source_id = ? AND session_id = ?
+                """,
+                (source_id, session_id),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "dirty": bool(row["dirty"]),
+            "revision": int(row["revision"]),
+            "clean_revision": int(row["clean_revision"]),
+            "updated_utc": str(row["updated_utc"]),
+        }
 
     def events(self, source_id: str | None = None) -> list[DetectedEvent]:
         query = "SELECT * FROM events"

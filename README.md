@@ -219,10 +219,6 @@ streamclip-ai/
 
 Technical prototyping and distribution are separate workstreams. Use test footage or sources you are authorized to process. Before publishing third-party livestream footage, verify the necessary rights, applicable game-publisher policies, music usage, and each platform's reused-content and publishing requirements. Public stream availability does not itself grant redistribution rights.
 
-## Next step
-
-**Implement Stage 1:** confirm operating system and hardware, install FFmpeg and Python, build the segmented recorder and rolling-buffer retention, and test with a local recording before connecting a live source.
-
 ## Running Stage 1
 
 Stage 1 is implemented as a local FFmpeg-supervised capture process. It needs Python 3.11+ and both `ffmpeg` and `ffprobe` on `PATH`. On Windows, download a trusted FFmpeg build, add its `bin` directory to `PATH`, open a new PowerShell window, and confirm:
@@ -233,7 +229,7 @@ ffmpeg -version
 ffprobe -version
 ```
 
-Create an environment and install the two Python dependencies:
+Create an environment and install the Python dependencies (`PyYAML`, `pytest`, `numpy`, `scipy`):
 
 ```powershell
 python -m venv .venv
@@ -241,13 +237,13 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Set the seven values in `config.yaml`, or pass a permitted source directly on the command line. `reanchor_threshold_seconds` defaults to `2.0`: within a session, segment timestamps are chained from media duration unless the filesystem timestamp differs by more than this amount. A local file with `is_live: false` is intentionally read with FFmpeg's `-re` flag, so it simulates a real-time source.
+Set the values in `config.yaml`, or pass a permitted source directly on the command line. `reanchor_threshold_seconds` defaults to `2.0`: within a session, segment timestamps are chained from media duration unless the filesystem timestamp differs by more than this amount. A local file with `is_live: false` is intentionally read with FFmpeg's `-re` flag, so it simulates a real-time source.
 
 ```powershell
 python -m app.ingestion --source .\path\to\authorized-recording.mp4 --config config.yaml
 ```
 
-Segments are written to `segments_dir` as MPEG-TS files with a timestamp in the filename. `manifest.sqlite3` stores the corrected UTC capture-start time, raw filesystem creation time (`fs_created_utc`), duration, status, source ID, persistent pin flag, re-anchor flag, and FFmpeg session ID. A new session ID is created after every reconnect, so downstream stages can identify candidate windows spanning a capture gap. Existing manifests are migrated in place on startup. Copy-mode segmentation preserves source packets and only starts a new segment at existing keyframes, so actual durations can vary with the source GOP size.
+Segments are written to `segments_dir` as MPEG-TS files with a timestamp in the filename. `manifest.sqlite3` stores the unique auto-incrementing segment ID, corrected UTC capture-start time, raw filesystem creation time (`fs_created_utc`), duration, status, source ID, persistent pin flag, re-anchor flag, and FFmpeg session ID. A new session ID is created after every reconnect, so downstream stages can identify candidate windows spanning a capture gap. Existing manifests are migrated in place on startup. Copy-mode segmentation preserves source packets and only starts a new segment at existing keyframes, so actual durations can vary with the source GOP size.
 
 Run unit tests without FFmpeg:
 
@@ -272,7 +268,7 @@ python scripts\soak_test.py --duration-seconds 120 --retention-seconds 60
 
 Stage 2 performs local, lightweight audio and video analysis only—no LLM, speech-to-text, chat API, or publishing integration is involved. It needs the Stage 1 `ffmpeg`/`ffprobe` setup plus NumPy and SciPy from `requirements.txt`.
 
-Detection settings are under `detection:` in `config.yaml`. `scale_floors` and `relative_scale_floor` keep near-constant audio or video baselines from turning tiny codec fluctuations into large z-scores; each feature uses the largest of scaled MAD, its absolute floor, and the relative floor. Raw one-second features are persisted in the Stage 1 manifest database, making score thresholds and weights re-tunable without decoding media again.
+Detection settings are under `detection:` in `config.yaml`. `scale_floors` and `relative_scale_floor` keep near-constant audio or video baselines from turning tiny codec fluctuations into large z-scores; each feature uses the largest of scaled MAD, its absolute floor, and the relative floor. Raw one-second features are persisted in the Stage 1 manifest database, making score thresholds and weights re-tunable without decoding media again. A durable session-level state table (`session_analysis_state`) tracks monotonically increasing revisions and dirty state to guarantee crash recovery across process interruptions.
 
 Follow newly completed segments while Stage 1 is running:
 

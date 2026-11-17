@@ -41,36 +41,56 @@ def bin_layout(duration_seconds: float) -> list[tuple[float, float]]:
 
 
 def _run_ffmpeg(command: Sequence[str]) -> bytes:
-    result = subprocess.run(
-        list(command),
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=120,
-    )
-    return result.stdout
+    try:
+        result = subprocess.run(
+            list(command),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=120,
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as exc:
+        stderr_msg = exc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            f"FFmpeg command failed with exit code {exc.returncode}: {stderr_msg}"
+        ) from exc
 
 
 def decode_audio(path: Path, sample_rate: int, ffmpeg_binary: str = "ffmpeg") -> np.ndarray:
-    """Decode audio to mono float32 samples through FFmpeg stdout."""
-    raw = _run_ffmpeg(
-        [
-            ffmpeg_binary,
-            "-v",
-            "error",
-            "-i",
-            str(path),
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            str(sample_rate),
-            "-f",
-            "f32le",
-            "pipe:1",
-        ]
-    )
-    return np.frombuffer(raw, dtype="<f4").astype(np.float32, copy=False)
+    """Decode audio to mono float32 samples through FFmpeg stdout.
+
+    Gracefully handles media without an audio stream by returning an empty float32 array.
+    """
+    try:
+        raw = _run_ffmpeg(
+            [
+                ffmpeg_binary,
+                "-v",
+                "error",
+                "-i",
+                str(path),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                str(sample_rate),
+                "-f",
+                "f32le",
+                "pipe:1",
+            ]
+        )
+        return np.frombuffer(raw, dtype="<f4").astype(np.float32, copy=False)
+    except RuntimeError as exc:
+        err_lower = str(exc).lower()
+        if (
+            "does not contain any stream" in err_lower
+            or "matches no streams" in err_lower
+            or "invalid argument" in err_lower
+        ):
+            LOGGER.info("Input %s contains no audio stream; returning zero audio samples", path)
+            return np.empty(0, dtype=np.float32)
+        raise
 
 
 def decode_video_gray(

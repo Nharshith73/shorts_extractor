@@ -78,6 +78,40 @@ def _fingerprint(video: Path) -> dict[str, object]:
     return dict(path=str(video), size=stat.st_size, mtime_ns=stat.st_mtime_ns)
 
 
+def make_render_provenance(
+    source_fingerprint: dict[str, object],
+    left: float,
+    right: float,
+    requested_encoder: str,
+    effective_encoder: str,
+    render_version: str = "1.0",
+) -> dict[str, object]:
+    codec_settings = (
+        {"preset": "veryfast", "crf": 18}
+        if effective_encoder == "libx264"
+        else {"preset": "p4", "cq": 18}
+    )
+    return {
+        "render_version": render_version,
+        "source_fingerprint": source_fingerprint,
+        "start_seconds": round(left, 6),
+        "end_seconds": round(right, 6),
+        "duration_seconds": round(right - left, 6),
+        "requested_encoder": requested_encoder,
+        "effective_encoder": effective_encoder,
+        "video_codec": effective_encoder,
+        "codec_settings": codec_settings,
+        "pix_fmt": "yuv420p",
+        "audio_codec": "aac",
+        "container_flags": ["+faststart"],
+    }
+
+
+def make_render_cache_key(provenance: dict[str, object]) -> str:
+    serialized = json.dumps(provenance, sort_keys=True, allow_nan=False)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
+
+
 def _produce(output: Path, config_path: Path, analysis: dict, features: list[FeatureBin],
              auxiliary: AuxiliaryFeatures | None, extract: bool, timings: dict[str, float]) -> tuple[list[dict], int, str | None]:
     detection = load_detection_config(config_path)
@@ -107,14 +141,39 @@ def _produce(output: Path, config_path: Path, analysis: dict, features: list[Fea
     at = time.perf_counter()
     for rank, (event, rule) in enumerate(selected, 1):
         left, right = peak_window(event, windows, analysis["start_seconds"], analysis["end_seconds"])
+        # Editorial candidate identity (stable window_id across reviews)
         key = hashlib.sha256(f'{analysis["fingerprint"]}:{left:.6f}:{right:.6f}'.encode()).hexdigest()[:24]
+
+        # Determine effective encoder and render provenance for this candidate
+        effective_encoder = selector.select(Path(analysis["video"]), left)
+        expected_provenance = make_render_provenance(
+            analysis["fingerprint"], left, right, windows.requested_encoder, effective_encoder
+        )
+        expected_render_key = make_render_cache_key(expected_provenance)
+
         peak = media_seconds(event.peak_wall_utc)
         hours, remainder = divmod(int(peak), 3600)
         minutes, seconds = divmod(remainder, 60)
         clip_path = clips_dir / f"clip_{rank:02d}_{hours:02d}-{minutes:02d}-{seconds:02d}_{event.score:.2f}.mp4"
         cached = cache.get(key, {})
+        has_modern_provenance = (
+            cached.get("render_cache_key") == expected_render_key
+            and cached.get("provenance") == expected_provenance
+        )
+        is_compatible_legacy = (
+            "render_cache_key" not in cached
+            and "provenance" not in cached
+            and cached.get("video_encoder") == effective_encoder
+            and (windows.requested_encoder in ("auto", cached.get("video_encoder")))
+        )
+        has_matching_provenance = has_modern_provenance or is_compatible_legacy
         old_file = Path(cached.get("clip_path", "."))
-        reused = old_file.is_file() and old_file.stat().st_size == cached.get("size_bytes")
+        reused = (
+            has_matching_provenance
+            and old_file.is_file()
+            and old_file.stat().st_size == cached.get("size_bytes")
+            and (cached.get("size_bytes") or 0) > 0
+        )
         extracted = False
         encoder = cached.get("video_encoder") if reused else None
         if reused:
@@ -141,15 +200,22 @@ def _produce(output: Path, config_path: Path, analysis: dict, features: list[Fea
                     actual_pre_roll_seconds=peak-left, actual_post_roll_seconds=right-peak,
                     score=event.score, components=event.components, rule=rule,
                     unclipped_z_scores=event.unclipped_z_scores, unclipped_score=event.unclipped_score,
-                    events=[event_data(event, rank)], video_encoder=encoder, extracted=extracted, reused=reused)
+                    events=[event_data(event, rank)], video_encoder=encoder, extracted=extracted, reused=reused,
+                    render_cache_key=expected_render_key if (has_modern_provenance or extracted) else None)
         write_json(clip_path.with_suffix(".json"), clip)
         if extracted:
             cache_dir = output / ".clip-cache"
             cache_dir.mkdir(exist_ok=True)
-            cached_file = cache_dir / f"{key}.mp4"
+            cached_file = cache_dir / f"{expected_render_key}.mp4"
             if not reused or old_file != cached_file:
                 shutil.copyfile(clip_path, cached_file)
-            cache[key] = dict(clip_path=str(cached_file), size_bytes=cached_file.stat().st_size, video_encoder=encoder)
+            cache[key] = dict(
+                clip_path=str(cached_file),
+                size_bytes=cached_file.stat().st_size,
+                video_encoder=encoder,
+                render_cache_key=expected_render_key,
+                provenance=expected_provenance,
+            )
         old = previous.get(key, {})
         top = "; ".join(f"{name}={value:.3f}" for name, value in sorted(event.components.items(), key=lambda item: -item[1])[:3])
         rows.append(dict(clip_path=str(clip_path), start_seconds=str(left), end_seconds=str(right), score=str(event.score),
