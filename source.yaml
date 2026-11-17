@@ -1,0 +1,43 @@
+# StreamClip AI — Single Live Source Configuration (Stage 4C)
+
+source:
+  id: primary_creator
+  creator_name: authorized_creator
+  platform: youtube
+  watch_url: https://www.youtube.com/watch?v=Opnkl7GVQEc
+
+  authorization:
+    permitted: true
+    capture: true
+    clipping: true
+    editing: true
+    publishing: true
+    permission_reference: permission-record-reference
+
+  acquisition:
+    method: direct_media_input
+    media_url_env: STREAMCLIP_LIVE_INPUT
+    media_url: ""  # Optional explicit local feed (e.g. rtmp://127.0.0.1:1935/live/test or udp://...)
+    reconnect_enabled: true
+    reconnect_max_attempts: 0  # 0 = indefinite reconnection attempts
+
+capture:
+  segment_seconds: 6
+  retention_seconds: 900
+  segments_dir: data/live_segments
+
+processing:
+  detection_enabled: true
+  transcription_enabled: true
+  ai_judging_enabled: true
+  rendering_enabled: true
+  human_approval_required: true
+
+queue:
+  max_queue_depth: 50
+  max_attempts: 3
+  stale_job_timeout_seconds: 120.0
+
+gpu:
+  serialize_vlm_and_render: true
+  max_vram_mb: 7800

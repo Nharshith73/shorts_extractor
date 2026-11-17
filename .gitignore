@@ -11,4 +11,12 @@ data/vod-benchmark/
 data/render-preflight/
 data/render-benchmark/
 data/synthetic_vod/
+data/live_segments/
+data/live_candidates/
+data/live_context/
+data/live_judgments/
+data/live_shorts/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
 .codex-deps/
