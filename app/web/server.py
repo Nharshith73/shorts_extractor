@@ -266,10 +266,14 @@ def api_list_shorts():
                 tags = meta.get("tags") or ["Shorts", "viral", "gaming", "highlights"]
                 desc = meta.get("description", "")
 
+            thumb_file = mp4.with_name(f"{mp4.stem}_thumb.jpg")
+            thumb_url = f"/media/file?path={urllib.parse.quote(str(thumb_file))}" if thumb_file.is_file() else None
+
             shorts.append({
                 "filename": mp4.name,
                 "path": str(mp4),
                 "url": f"/media/file?path={urllib.parse.quote(str(mp4))}",
+                "thumbnail_url": thumb_url,
                 "size_mb": round(st.st_size / (1024 * 1024), 2),
                 "mtime": st.st_mtime,
                 "title": title,
@@ -2247,7 +2251,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div style="display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid ${isChecked ? '#2563eb' : '#e5e7eb'}; background: ${isChecked ? '#eff6ff' : '#ffffff'}; border-radius: 6px; transition: border 0.15s;">
             <input type="checkbox" class="yt-lib-check" data-path="${escapeHtml(s.path)}" data-idx="${idx}" ${isChecked ? 'checked' : ''} onchange="toggleShortSelection('${escapeHtml(s.path)}', this.checked)" style="width: 16px; height: 16px; cursor: pointer;">
             <div style="width: 36px; height: 60px; background: #000; border-radius: 4px; overflow: hidden; position: relative; flex-shrink: 0; cursor: pointer;" onclick="playShort('${escapeHtml(s.path)}', '${titleText}', '${hookText}', '')">
-              <video src="${s.url}" style="width: 100%; height: 100%; object-fit: cover;" preload="metadata"></video>
+              ${s.thumbnail_url ? `<img src="${s.thumbnail_url}" style="width: 100%; height: 100%; object-fit: cover;">` : `<video src="${s.url}" style="width: 100%; height: 100%; object-fit: cover;" preload="metadata"></video>`}
               <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.25); color: #fff; font-size: 11px;">▶</div>
             </div>
             <div style="flex: 1; min-width: 0;">

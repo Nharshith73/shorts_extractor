@@ -105,6 +105,25 @@ def upload_short(
     shorts_url = f"https://www.youtube.com/shorts/{video_id}"
     watch_url = f"https://www.youtube.com/watch?v={video_id}"
 
+    # Auto-upload custom designed thumbnail if present and channel verified
+    thumb_candidates = [
+        video_path.with_name(f"{video_path.stem}_thumb.jpg"),
+        video_path.with_name(f"{video_path.stem}_thumb.png"),
+        video_path.with_suffix(".jpg"),
+    ]
+    for t_cand in thumb_candidates:
+        if t_cand.is_file():
+            try:
+                youtube.thumbnails().set(
+                    videoId=video_id,
+                    media_body=MediaFileUpload(str(t_cand), mimetype="image/jpeg"),
+                ).execute()
+                LOGGER.info("Uploaded custom Short thumbnail for %s", video_id)
+                break
+            except Exception as exc:
+                LOGGER.debug("Custom thumbnail set skipped (channel may require advanced verification): %s", exc)
+                break
+
     LOGGER.info("Successfully uploaded Short: id=%s url=%s", video_id, shorts_url)
 
     return {

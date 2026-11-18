@@ -33,13 +33,22 @@ def delete_uploaded_short_storage(video_path: str | Path) -> dict[str, Any]:
         except Exception as exc:
             LOGGER.warning("Could not delete short video %s: %s", vpath, exc)
 
-    # 2. Delete subtitles (.ass) if alongside
+    # 2. Delete subtitles (.ass) and thumbnail if alongside
     ass_file = vpath.with_suffix(".ass")
     if ass_file.is_file():
         try:
             freed_bytes += ass_file.stat().st_size
             ass_file.unlink(missing_ok=True)
             deleted_items.append(ass_file.name)
+        except Exception:
+            pass
+
+    thumb_file = vpath.with_name(f"{vpath.stem}_thumb.jpg")
+    if thumb_file.is_file():
+        try:
+            freed_bytes += thumb_file.stat().st_size
+            thumb_file.unlink(missing_ok=True)
+            deleted_items.append(thumb_file.name)
         except Exception:
             pass
 

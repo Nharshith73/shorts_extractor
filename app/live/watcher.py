@@ -344,7 +344,21 @@ class LiveWatcherSession:
                 selector=self._encoder_selector,
             )
 
-            # 7. Write metadata JSON
+            # 7. Generate matching 9:16 high-CTR thumbnail cover
+            thumb_path = self.shorts_dir / f"{clip_id}_thumb.jpg"
+            try:
+                from app.rendering.thumbnail import generate_thumbnail
+                generate_thumbnail(
+                    video_path=final_short_path,
+                    output_path=thumb_path,
+                    hook_text=hook_text,
+                    badge_text="GTA VI",
+                    timestamp_seconds=min(2.5, final_duration * 0.4),
+                )
+            except Exception as exc:
+                LOGGER.debug("Auto thumbnail skipped: %s", exc)
+
+            # 8. Write metadata JSON
             meta = {
                 "clip_id": clip_id,
                 "title": title_text,
@@ -361,6 +375,7 @@ class LiveWatcherSession:
                 "channel": self.channel,
                 "platform": self.platform,
                 "path": str(final_short_path),
+                "thumbnail_path": str(thumb_path) if thumb_path.is_file() else None,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             (self.metadata_dir / f"{clip_id}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
