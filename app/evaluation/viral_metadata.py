@@ -1,6 +1,6 @@
 """Attention-Grabbing Viral Metadata System for YouTube Shorts, Reels, and TikTok.
 
-Engineers high-CTR click-worthy titles with curiosity gaps, structured viral
+Engineers high-CTR click-worthy titles with curiosity gaps, natural story-driven
 descriptions with streamer credits and engagement CTAs, and algorithmically
 targeted tags for maximum reach on YouTube Shorts feeds.
 """
@@ -77,6 +77,64 @@ CALLS_TO_ACTION = [
     "Tag a friend who would totally do this! 😂",
 ]
 
+# Natural, human, high-energy storytelling descriptions (NO TELEMETRY / NO ROBOT TEXT)
+STORY_TEMPLATES = {
+    "clutch": [
+        "Unreal clutch play caught live on stream with @{creator}! Watch till the end to see how this play unfolded.",
+        "Absolute god-mode moment from @{creator}! Nobody in the chat expected this to actually work out.",
+        "One of the craziest plays of the entire stream! @{creator} was completely locked in for this one.",
+    ],
+    "funny": [
+        "Absolute comedy moment from @{creator}'s live stream! Nobody in the chat could stop laughing at what just happened.",
+        "You won't believe what happened live on @{creator}'s stream. Pure instant regret caught on camera!",
+        "When the joke goes way too far on stream! @{creator}'s reaction is honestly priceless.",
+    ],
+    "shock": [
+        "You won't believe what happened live on @{creator}'s stream! The whole audience was in complete disbelief.",
+        "Nobody saw this coming on @{creator}'s stream! Watch till the very end to see the full reaction.",
+        "An unforgettable moment from @{creator}'s live stream. The timing could not have been more perfect!",
+    ],
+    "chat": [
+        "The chat completely lost it during this wild moment on @{creator}'s stream! The hype was unmatched.",
+        "Everyone in the chat started spamming W's during this unreal moment with @{creator}!",
+        "The stream went into absolute chaos when this happened on @{creator}'s stream. Watch the reaction!",
+    ],
+    "general": [
+        "An unreal moment caught live on stream with @{creator}! Watch till the end to see the full reaction.",
+        "One of the best highlights from @{creator}'s live broadcast today. Pure entertainment from start to finish!",
+        "You have to see this moment from @{creator}'s stream! Things got chaotic real fast.",
+    ],
+}
+
+
+def clean_text_for_metadata(text: str) -> str:
+    """Strip telemetry, robot text, duplicate headers, dividers, and hashtags from input text."""
+    if not text:
+        return ""
+    lines = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # Remove telemetry patterns like "Kick chat surged 2.7x baseline (148 messages in 10s)"
+        if re.search(r"[A-Za-z]+ chat surged [\d\.]+x baseline", line) or re.search(r"\d+ messages in \d+s", line):
+            continue
+        # Remove repeated labels
+        if line.startswith("Spoken dialogue:") or "Spoken dialogue:" in line:
+            clean_part = re.sub(r"^Spoken dialogue:\s*", "", line).strip(' "')
+            if clean_part and not re.search(r"chat surged|baseline", clean_part):
+                lines.append(clean_part)
+            continue
+        # Remove existing template scaffolding
+        if "━━━" in line or line.startswith("📺 Streamer:") or line.startswith("🌟 Daily") or line.startswith("👉 LIKE") or line.startswith("💬"):
+            continue
+        if line.startswith("#Shorts") or line.startswith("#shorts"):
+            continue
+        if any(h in line for h in ["🔥💀", "PURE CHAOS", "WHAT JUST HAPPENED", "BRO REALLY THOUGHT", "WATCH THIS CLUTCH"]):
+            continue
+        lines.append(line)
+    return " ".join(lines).strip()
+
 
 @dataclass
 class ViralMetadata:
@@ -110,27 +168,31 @@ class ViralMetadataGenerator:
         creator_clean = creator.lstrip("@").strip() if creator else "Streamer"
         platform_clean = platform.lower().strip()
 
+        # Sanitize any incoming dialogue and summary to purge robot/telemetry text
+        clean_dia = clean_text_for_metadata(dialogue)
+        clean_sum = clean_text_for_metadata(raw_summary)
+
         # 1. Try Groq AI generation if available and requested
         if use_ai:
             ai_meta = cls._try_groq_generation(
-                dialogue=dialogue,
+                dialogue=clean_dia,
                 creator=creator_clean,
                 platform=platform_clean,
                 category=category,
                 spike_ratio=spike_ratio,
-                raw_summary=raw_summary,
+                raw_summary=clean_sum,
             )
             if ai_meta:
                 return ai_meta
 
         # 2. Algorithmic High-CTR Rule Engine (Zero-Cost / Offline Guarantee)
         return cls._generate_algorithmic(
-            dialogue=dialogue,
+            dialogue=clean_dia,
             creator=creator_clean,
             platform=platform_clean,
             category=category,
             spike_ratio=spike_ratio,
-            raw_summary=raw_summary,
+            raw_summary=clean_sum,
         )
 
     @classmethod
@@ -153,11 +215,12 @@ class ViralMetadataGenerator:
             system_prompt = (
                 "You are an elite YouTube Shorts and TikTok viral content strategist.\n"
                 "Your objective is to craft an attention-grabbing, high-CTR package for a gaming/stream highlight.\n"
-                "Rules:\n"
+                "CRITICAL RULES:\n"
                 "1. 'title': Must be under 80 characters, highly click-worthy with strong curiosity gaps, "
-                "personality, and 1-2 emojis (e.g. 💀, 😭, 😱, 🔥, 😂). MUST END with '#Shorts'. Never write boring descriptive summaries.\n"
+                "personality, and 1-2 emojis (e.g. 💀, 😭, 😱, 🔥, 😂). MUST END with '#Shorts'. Never use outer quotation marks. Never write boring summaries.\n"
                 "2. 'suggested_hook': 3-5 punchy words in ALL CAPS with an emoji for on-screen caption text (e.g. 'BRO REALLY THOUGHT 💀').\n"
-                "3. 'description': Engaging 2-sentence story summary written in high-energy streamer culture language.\n"
+                "3. 'description': Engaging, natural 2-sentence story summary written in entertaining streamer language. "
+                "NEVER include mechanical chat telemetry like 'chat surged 2.7x baseline' or 'messages in 10s'. Focus on the human story and viewer excitement.\n"
                 "4. 'tags': Array of 15 to 20 optimized, search-friendly tags for YouTube Shorts algorithm.\n"
                 "5. 'call_to_action': 1-sentence spicy question to pin in the comments to drive replies.\n"
                 "Return strictly valid JSON matching this schema:\n"
@@ -167,9 +230,8 @@ class ViralMetadataGenerator:
             prompt_user = (
                 f"Streamer: {creator} (Platform: {platform.upper()})\n"
                 f"Event Category: {category}\n"
-                f"Audience Chat Spike: {spike_ratio:.1f}x baseline\n"
-                f"Summary of Action: {raw_summary or 'Exciting live stream moment'}\n"
-                f"Spoken Dialogue: '{dialogue[:300]}'\n\n"
+                f"Action Context: {raw_summary or 'Exciting live stream moment'}\n"
+                f"Dialogue: '{dialogue[:300]}'\n\n"
                 "Generate the viral YouTube Shorts package JSON now:"
             )
 
@@ -183,13 +245,15 @@ class ViralMetadataGenerator:
             )
 
             data = json.loads(raw_json)
-            title = data.get("title", "").strip()
+            title = data.get("title", "").strip().strip('"\'')
             if "#Shorts" not in title and "#shorts" not in title:
                 title = f"{title} #Shorts"
 
             hook = data.get("suggested_hook", "WHAT JUST HAPPENED?! 💀").strip().upper()
             cta = data.get("call_to_action", random.choice(CALLS_TO_ACTION)).strip()
-            raw_desc = data.get("description", raw_summary or "Unreal moment caught live on stream.").strip()
+            raw_desc = clean_text_for_metadata(data.get("description", raw_summary or "").strip())
+            if not raw_desc or "chat surged" in raw_desc:
+                raw_desc = random.choice(STORY_TEMPLATES.get(category, STORY_TEMPLATES["general"])).format(creator=creator)
 
             tags = data.get("tags") or []
             if not isinstance(tags, list) or len(tags) < 5:
@@ -226,7 +290,7 @@ class ViralMetadataGenerator:
         spike_ratio: float,
         raw_summary: str,
     ) -> ViralMetadata:
-        """High-energy heuristic engine generating viral package instantly."""
+        """High-energy heuristic engine generating viral package instantly with zero telemetry."""
         detected_archetype = cls._detect_archetype(dialogue, category, spike_ratio)
 
         # 1. Title Generation
@@ -234,10 +298,12 @@ class ViralMetadataGenerator:
         template = random.choice(templates)
         title = template.format(creator=creator)
 
-        # If dialogue contains a punchy short quote, prioritize high-engagement quote title
+        # If dialogue contains a punchy short quote, prioritize high-engagement quote title without outer quotes
         quote_match = cls._extract_punchy_quote(dialogue)
         if quote_match and len(quote_match) <= 35:
-            title = f'"{quote_match.upper()}" 💀 #Shorts'
+            clean_q = quote_match.strip(' "“’\'')
+            if clean_q and not any(t in clean_q.lower() for t in ("chat surged", "baseline", "messages in")):
+                title = f"{clean_q.upper()} 💀 #Shorts"
 
         # 2. Hook Generation
         hook_options = ON_SCREEN_HOOKS.get(detected_archetype, ON_SCREEN_HOOKS["general"])
@@ -249,13 +315,13 @@ class ViralMetadataGenerator:
         # 4. Tags
         tags = cls._build_tags(creator, platform, category, dialogue)
 
-        # 5. Formatted Description
-        context_story = raw_summary.strip() if raw_summary.strip() else (
-            f"You won't believe what {creator} did live on stream! "
-            f"The chat completely lost it during this wild moment."
-        )
-        if len(dialogue.strip()) > 10:
-            context_story += f' Spoken dialogue: "{dialogue[:120].strip()}..."'
+        # 5. Formatted Natural Story Description (NO TELEMETRY / NO ROBOT TEXT)
+        story_opts = STORY_TEMPLATES.get(detected_archetype, STORY_TEMPLATES["general"])
+        context_story = random.choice(story_opts).format(creator=creator)
+
+        # If clean narrative summary is available and free of telemetry, prefer it
+        if raw_summary and len(raw_summary.strip()) > 10 and not any(w in raw_summary.lower() for w in ("chat surged", "baseline", "messages in")):
+            context_story = raw_summary.strip()
 
         description = cls._format_structured_description(
             hook=hook,
@@ -298,15 +364,14 @@ class ViralMetadataGenerator:
         """Extract short dramatic quote from dialogue if suitable for title."""
         if not dialogue:
             return None
-        # Look for exclamation or short question in transcript
         parts = re.split(r"[.?!]", dialogue)
         for part in parts:
-            clean = part.strip()
+            clean = part.strip(' "\'()[]')
             word_count = len(clean.split())
             if 2 <= word_count <= 6 and len(clean) <= 35:
-                # Discard filler phrases
                 if not any(f == clean.lower() for f in ("thank you", "hello", "hi guys", "one sec", "okay")):
-                    return clean
+                    if not any(bad in clean.lower() for bad in ("chat surged", "baseline", "messages in", "dialogue")):
+                        return clean
         return None
 
     @classmethod
@@ -364,7 +429,7 @@ class ViralMetadataGenerator:
         cta: str,
         tags: list[str],
     ) -> str:
-        """Standard high-converting 5-part YouTube Shorts description layout."""
+        """Standard high-converting YouTube Shorts description layout with natural storytelling."""
         creator_tag = f"@{creator.lstrip('@')}" if creator else "@Streamer"
         hashtag_cloud = " ".join([f"#{t.replace(' ', '')}" for t in tags[:10] if not t.startswith("#")])
 
@@ -374,8 +439,8 @@ class ViralMetadataGenerator:
             summary.strip(),
             "",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"📺 Streamer: {creator_tag} ({platform.upper()})",
-            "🌟 Daily Stream Moments & Clutch Plays",
+            f"📺 Streamer: {creator_tag}",
+            "🌟 Daily Viral Stream Highlights & Clutch Reactions",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
             f"💬 {cta}",
