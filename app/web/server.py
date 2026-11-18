@@ -27,7 +27,7 @@ import urllib.parse
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from app.evaluation.providers.groq import resolve_groq_api_key
@@ -89,6 +89,11 @@ def list_inbox_videos() -> list[dict[str, Any]]:
             except Exception:
                 pass
     return sorted(videos, key=lambda v: v["mtime"], reverse=True)
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def api_favicon():
+    return Response(content=b"", media_type="image/x-icon", status_code=204)
 
 
 @app.get("/api/videos")
@@ -2513,7 +2518,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         } catch (e) {}
       }
       await fetchYouTubeQueue();
-    }
     }
 
     async function updateQueueItemMetadata(itemId, key, value) {
