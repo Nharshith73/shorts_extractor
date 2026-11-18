@@ -42,6 +42,7 @@ class RenderConfig:
     encoder: str = "auto"
     crf: int = 18
     preset: str = "medium"
+    creator_credit: str | None = None
 
     def validate(self) -> None:
         if not self.whisper_model or not self.compute_type or not self.language:
@@ -86,6 +87,8 @@ class RenderConfig:
                 raise ValueError("facecam_region uses integer source pixels")
             if min(region.x, region.y) < 0 or min(region.w, region.h) <= 0:
                 raise ValueError("invalid facecam_region")
+        if self.creator_credit is not None and not isinstance(self.creator_credit, str):
+            raise ValueError("creator_credit must be a string or None")
 
 
 def load_render_config(path: Path) -> RenderConfig:

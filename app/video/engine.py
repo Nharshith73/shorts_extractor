@@ -284,7 +284,9 @@ def process_job(queue, row, provider, args):
         clip = replace(clip, start=boundary['applied'][0], end=boundary['applied'][1])
         if not args.min_duration <= clip.end - clip.start <= args.max_duration:
             raise ValueError('fallback candidate duration is outside configured limits')
-        result = render_clip(clip, work, render_config, transcriber, selector)
+        creator_tag = manifest.get('creator_identity') or getattr(args, 'creator', None)
+        effective_render_cfg = replace(render_config, creator_credit=f"@{creator_tag.strip().lstrip('@')}") if creator_tag else render_config
+        result = render_clip(clip, work, effective_render_cfg, transcriber, selector)
         import shutil
         target = output / 'shorts'; target.mkdir(exist_ok=True)
         for path in (work / 'final').glob(Path(result['clip_path']).stem + '.*'): shutil.copy2(path, target / path.name)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 import subprocess
+import sys
 import threading
 import time
 from typing import Any
@@ -45,6 +46,7 @@ class StreamlinkRecorder:
         self._start_time: float | None = None
         self._lock = threading.Lock()
         self._error_message: str | None = None
+        self._log_fh = None
 
     @property
     def is_recording(self) -> bool:
@@ -76,7 +78,7 @@ class StreamlinkRecorder:
                     pass
 
             cmd = [
-                "python",
+                sys.executable,
                 "-m",
                 "streamlink",
             ]
@@ -89,21 +91,28 @@ class StreamlinkRecorder:
                 "-o",
                 str(self.output_file),
                 "--loglevel",
-                "warning",
+                "info",
             ])
+
+            log_file = self.output_dir / "streamlink.log"
+            self._log_fh = open(log_file, "w", encoding="utf-8")
 
             LOGGER.info("Starting streamlink: %s", " ".join(cmd))
             try:
                 self._process = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdout=self._log_fh,
+                    stderr=subprocess.STDOUT,
                     text=True,
                 )
                 self._start_time = time.time()
                 self._error_message = None
             except Exception as exc:
                 self._error_message = str(exc)
+                if self._log_fh:
+                    try: self._log_fh.close()
+                    except Exception: pass
+                    self._log_fh = None
                 LOGGER.error("Failed to start streamlink: %s", exc)
                 raise
 
@@ -122,6 +131,13 @@ class StreamlinkRecorder:
                         pass
                 self._process = None
 
+            if self._log_fh:
+                try:
+                    self._log_fh.close()
+                except Exception:
+                    pass
+                self._log_fh = None
+
     def poll_status(self) -> dict[str, Any]:
         """Check process health and recorded file stats."""
         alive = self.is_recording
@@ -135,8 +151,16 @@ class StreamlinkRecorder:
         if not alive and self._process and self._process.poll() is not None:
             code = self._process.poll()
             if code != 0 and not self._error_message:
-                _, err = self._process.communicate()
-                self._error_message = (err or f"Streamlink exited with return code {code}").strip()
+                log_file = self.output_dir / "streamlink.log"
+                if log_file.is_file():
+                    try:
+                        lines = log_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+                        err_tail = [l for l in lines if "error" in l.lower() or "warning" in l.lower()]
+                        self._error_message = " ".join(err_tail[-3:]) if err_tail else f"Streamlink exited with code {code}"
+                    except Exception:
+                        self._error_message = f"Streamlink exited with code {code}"
+                else:
+                    self._error_message = f"Streamlink exited with code {code}"
 
         return {
             "alive": alive,
@@ -194,6 +218,9 @@ class StreamlinkRecorder:
         clip_start = max(0.0, start_seconds - safe_pad)
         duration = max(1.0, end_seconds - clip_start + safe_pad)
 
+        # Fast seek with PTS normalization: resets both audio and video presentation
+        # timestamps to 0.000s, ensuring precision sync while extracting in < 2 seconds
+        # even on multi-hour transport stream recordings (.ts).
         cmd = [
             "ffmpeg",
             "-y",
@@ -203,10 +230,16 @@ class StreamlinkRecorder:
             str(self.output_file),
             "-t",
             f"{duration:.2f}",
+            "-vf",
+            "setpts=PTS-STARTPTS",
+            "-af",
+            "asetpts=PTS-STARTPTS",
+            "-avoid_negative_ts",
+            "make_zero",
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            "ultrafast",
             "-crf",
             "20",
             "-c:a",

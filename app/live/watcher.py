@@ -305,7 +305,7 @@ class LiveWatcherSession:
             # 5. AI Editorial Filter / Hook Generation (optional)
             hook_text = "WHAT JUST HAPPENED?!"
             editorial_rating = 4
-            summary = f"Twitch chat surged {spike.spike_ratio:.1f}x baseline ({spike.message_count} messages in 10s)"
+            summary = f"{self.platform.capitalize()} chat surged {spike.spike_ratio:.1f}x baseline ({spike.message_count} messages in 10s)"
 
             if self.ai_mode in ("groq", "qwen"):
                 ai_meta = self._run_ai_judgment(
@@ -319,10 +319,12 @@ class LiveWatcherSession:
                     summary = ai_meta.get("summary", summary)
 
             # 6. Render final 9:16 vertical Short
+            creator_tag = f"@{self.channel.lstrip('@')}" if self.channel else None
             render_cfg = RenderConfig(
                 layout=self.layout,
                 captions_enabled=True,
                 crf=20,
+                creator_credit=creator_tag,
             )
 
             final_short_path = self.shorts_dir / f"{clip_id}.mp4"
@@ -372,7 +374,7 @@ class LiveWatcherSession:
                 provider = GroqHighlightJudgeProvider()
                 if provider.has_valid_key():
                     prompt = (
-                        f"Streamer #{self.channel} had a major Twitch chat reaction spike ({spike.message_count} msgs in 10s, {spike.spike_ratio:.1f}x baseline).\n"
+                        f"Streamer #{self.channel} had a major {self.platform.capitalize()} chat reaction spike ({spike.message_count} msgs in 10s, {spike.spike_ratio:.1f}x baseline).\n"
                         f"Spoken dialogue: '{summary_text}'\n"
                         "Generate a viral YouTube Shorts on-screen caption hook (under 6 words, punchy, curiosity-inducing) and 1-sentence summary.\n"
                         'Return strict JSON: {"hook_suggestion": "...", "summary": "...", "editorial_rating": 4}'
@@ -436,8 +438,9 @@ class LiveWatcherSession:
 
     def _extract_subclip_ffmpeg(self, source: Path, start: float, end: float, out_path: Path) -> None:
         cmd = [
-            "ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", str(source),
-            "-to", f"{end:.2f}", "-c:v", "libx264", "-preset", "veryfast",
+            "ffmpeg", "-y", "-i", str(source), "-ss", f"{start:.2f}",
+            "-t", f"{max(1.0, end - start):.2f}", "-avoid_negative_ts", "make_zero",
+            "-c:v", "libx264", "-preset", "veryfast",
             "-crf", "20", "-c:a", "aac", str(out_path),
         ]
         import subprocess
@@ -457,6 +460,7 @@ def create_test_short(
     layout: str = "blurred_background",
     encoder: str = "auto",
     duration_seconds: float = 30.0,
+    creator_credit: str = "@streamer",
 ) -> dict[str, Any]:
     """Generate and render a 30s test vertical Short into completed output."""
     output_dir = Path(output_dir).resolve()
@@ -483,7 +487,12 @@ def create_test_short(
 
     info = probe_media(source_mp4)
     selector = EncoderSelector(requested=encoder)
-    render_cfg = RenderConfig(layout=layout, captions_enabled=True, crf=20)
+    render_cfg = RenderConfig(
+        layout=layout,
+        captions_enabled=True,
+        crf=20,
+        creator_credit=creator_credit,
+    )
 
     # 2. Add sample viral subtitles
     words = [

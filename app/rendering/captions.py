@@ -51,7 +51,7 @@ def ass_time(seconds: float) -> str:
     return f"{hours}:{minutes:02d}:{whole:02d}.{hundredths:02d}"
 
 
-def generate_ass(words: Sequence[Word], config: RenderConfig, family: str) -> str:
+def generate_ass(words: Sequence[Word], config: RenderConfig, family: str, duration: float = 60.0) -> str:
     base, highlight, border, back = STYLES[config.caption_style]
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -63,18 +63,38 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Caption,{family},{config.font_size},{base},{highlight},&H00000000,{back},-1,0,0,0,100,100,0,0,{border},{config.outline},{config.shadow},2,{config.margin_horizontal},{config.margin_horizontal},{config.margin_bottom},1
+Style: Credit,{family},36,&H00FFFFFF,&H00000000,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,2,1,8,40,40,90,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = [header]
+    if config.creator_credit and config.creator_credit.strip():
+        tag = config.creator_credit.strip()
+        if not tag.startswith("@"):
+            tag = f"@{tag}"
+        credit_end = ass_time(duration)
+        lines.append(f"Dialogue: 1,0:00:00.00,{credit_end},Credit,,0,0,0,,{tag}\n")
+
     base_bgr, highlight_bgr = f"&H{base[-6:]}&", f"&H{highlight[-6:]}&"
-    for group in phrase_groups(words, config):
+    groups = phrase_groups(words, config)
+    for g_idx, group in enumerate(groups):
         phrase = [display_word(word.text, config.uppercase) for word in group]
         # Fit unusually long individual words rather than overflowing safe margins.
         font_size = min(config.font_size, int((1080 - 2 * config.margin_horizontal) / (max(1, len(" ".join(phrase))) * 0.65)))
         for index, word in enumerate(group):
-            end = group[index + 1].start if index + 1 < len(group) else word.end
+            if index + 1 < len(group):
+                end = group[index + 1].start
+            else:
+                # For the last word of a group, hold the completed phrase on screen
+                # until the next phrase begins (or up to 0.75s sustain) so captions don't
+                # abruptly vanish and feel like they are flying by too fast!
+                if g_idx + 1 < len(groups):
+                    next_start = groups[g_idx + 1][0].start
+                    end = max(word.end, min(next_start, word.end + 0.75))
+                else:
+                    end = max(word.end, word.start + 0.5)
+
             if round(end * 100) <= round(word.start * 100):
                 continue
             text = " ".join(f"{{\\1c{highlight_bgr}}}{token}{{\\1c{base_bgr}}}" if at == index else token

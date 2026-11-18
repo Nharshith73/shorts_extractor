@@ -4,21 +4,25 @@ from typing import Any, Sequence
 
 
 def snap_to_speech_boundaries(
-    start: float,
-    end: float,
-    peak: float,
-    segments: Sequence[Any],
+    start: float | None = None,
+    end: float | None = None,
+    peak: float = 0.0,
+    segments: Sequence[Any] = (),
     min_duration: float = 15.0,
     max_duration: float = 60.0,
     max_lookback: float = 8.0,
     max_lookforward: float = 14.0,
     reaction_padding: float = 1.8,
+    raw_start: float | None = None,
+    raw_end: float | None = None,
 ) -> tuple[float, float]:
     """Snap candidate window boundaries to sentence beginnings and punchline ends.
     
     Prevents cutting speakers off mid-word or mid-sentence and ensures the comedic
     or dramatic setup is fully included, followed by natural reaction breathing room.
     """
+    start = start if start is not None else (raw_start if raw_start is not None else 0.0)
+    end = end if end is not None else (raw_end if raw_end is not None else 60.0)
     if not segments:
         return start, end
 

@@ -677,7 +677,16 @@ def run_download_worker(url: str, output_name: str | None, browser: str | None =
                 if len(ACTIVE_TASKS[task_id]["logs"]) > 100:
                     ACTIVE_TASKS[task_id]["logs"].pop(0)
         proc.wait()
-        ACTIVE_TASKS[task_id]["status"] = "COMPLETED" if proc.returncode == 0 else "FAILED"
+        if proc.returncode == 0:
+            ACTIVE_TASKS[task_id]["status"] = "COMPLETED"
+        else:
+            ACTIVE_TASKS[task_id]["status"] = "FAILED"
+            log_str = " ".join(ACTIVE_TASKS[task_id]["logs"])
+            if "Could not copy Chrome cookie database" in log_str:
+                ACTIVE_TASKS[task_id]["logs"].append(
+                    "💡 NOTE: Google Chrome is currently open on Windows, which locks its cookie database. "
+                    "Either close Chrome completely while downloading, or export your cookies to cookies.txt (via 'Get cookies.txt LOCALLY' extension) and click 'Upload cookies.txt'."
+                )
     except Exception as exc:
         ACTIVE_TASKS[task_id]["status"] = "ERROR"
         ACTIVE_TASKS[task_id]["error"] = str(exc)
@@ -817,9 +826,10 @@ def api_watcher_test_clip(req: WatcherTestClipRequest = WatcherTestClipRequest()
                 "detail": res,
             }
         except RuntimeError as exc:
-            LOGGER.warning("Manual live clip fallback: %s", exc)
+            LOGGER.warning("Manual live clip trigger failed: %s", exc)
+            raise HTTPException(status_code=400, detail=str(exc))
 
-    # 2. Standalone 30s test short rendering
+    # 2. Standalone test short rendering (when no live stream is actively being recorded)
     meta = create_test_short(
         output_dir=COMPLETED_DIR,
         layout=req.layout,
@@ -829,7 +839,7 @@ def api_watcher_test_clip(req: WatcherTestClipRequest = WatcherTestClipRequest()
     return {
         "status": "COMPLETED",
         "mode": "standalone_test",
-        "message": "Successfully rendered 30s test reel into shorts directory",
+        "message": "Successfully rendered test reel into shorts directory",
         "short": meta,
     }
 

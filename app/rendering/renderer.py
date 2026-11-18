@@ -57,9 +57,9 @@ def render_original(source: Path, output: Path, start: float, duration: float,
     """Render into a temporary MP4; callers validate and atomically replace it."""
     source, output, work = source.resolve(), output.resolve(), work.resolve()
     family = stage_fonts(config.fonts_dir, work / "fonts")
-    captions = bool(words) and config.captions_enabled
+    captions = (bool(words) or bool(config.creator_credit)) and config.captions_enabled
     if captions:
-        (work / "captions.ass").write_text(generate_ass(words, config, family), encoding="utf-8")
+        (work / "captions.ass").write_text(generate_ass(words, config, family, duration=duration), encoding="utf-8")
     layout = build_layout(config, info.width, info.height, captions)
     encoder = selector.select(source, start)
     codec = ["-c:v", encoder]
