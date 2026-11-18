@@ -1080,8 +1080,9 @@ def api_youtube_queue_start():
 
 @app.post("/api/youtube/upload-now")
 def api_youtube_upload_now(req: UploadNowRequest):
-    """Directly upload a single Short immediately."""
+    """Directly upload a single Short immediately and free storage upon success."""
     from app.youtube.uploader import upload_short
+    from app.youtube.queue_manager import delete_uploaded_short_storage
     try:
         res = upload_short(
             video_path=req.video_path,
@@ -1090,6 +1091,9 @@ def api_youtube_upload_now(req: UploadNowRequest):
             tags=req.tags,
             privacy=req.privacy,
         )
+        # Free storage space once uploaded
+        cleanup = delete_uploaded_short_storage(req.video_path)
+        res["freed_mb"] = cleanup.get("freed_mb", 0.0)
         return res
     except Exception as exc:
         LOGGER.error("Direct YouTube upload failed: %s", exc)
@@ -2391,7 +2395,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         } else if (item.status === 'uploading') {
           statusBadge = `<span class="badge badge-active">🚀 Uploading ${item.progress || 0}%</span>`;
         } else if (item.status === 'completed') {
-          statusBadge = '<span class="badge badge-success">✓ Live on YouTube</span>';
+          const freedLabel = item.freed_mb ? ` <span style="font-size: 10px; color: #059669; font-weight: 500; margin-left: 4px;">💾 Freed ${item.freed_mb}MB</span>` : (item.deleted_from_storage ? ` <span style="font-size: 10px; color: #059669; font-weight: 500; margin-left: 4px;">💾 Storage Freed</span>` : '');
+          statusBadge = `<span class="badge badge-success">✓ Live on YouTube</span>${freedLabel}`;
         } else if (item.status === 'failed') {
           statusBadge = `<span class="badge badge-danger" title="${escapeHtml(item.error || 'Failed')}">✕ Failed</span>`;
         }
@@ -2413,7 +2418,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
             ${item.shorts_url ? `
               <div style="margin-bottom: 10px; padding: 8px; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 4px; display: flex; justify-content: space-between; align-items: center;">
-                <span style="font-size: 12px; color: #065f46; font-weight: 500;">Short published successfully!</span>
+                <span style="font-size: 12px; color: #065f46; font-weight: 500;">Short published successfully! ${item.deleted_from_storage ? '• 💾 Storage freed' : ''}</span>
                 <a href="${item.shorts_url}" target="_blank" style="font-size: 12px; color: #2563eb; font-weight: 600; text-decoration: none;">Open Short ↗</a>
               </div>` : ''}
 

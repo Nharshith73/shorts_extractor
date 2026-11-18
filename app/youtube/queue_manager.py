@@ -17,6 +17,70 @@ LOGGER = logging.getLogger(__name__)
 QUEUE_FILE = Path("data/youtube_queue.json")
 
 
+def delete_uploaded_short_storage(video_path: str | Path) -> dict[str, Any]:
+    """Delete rendered short MP4, intermediate work folder, and metadata to free disk storage."""
+    import shutil
+    vpath = Path(video_path).resolve()
+    freed_bytes = 0
+    deleted_items = []
+
+    # 1. Delete the rendered Short MP4
+    if vpath.is_file():
+        try:
+            freed_bytes += vpath.stat().st_size
+            vpath.unlink(missing_ok=True)
+            deleted_items.append(vpath.name)
+        except Exception as exc:
+            LOGGER.warning("Could not delete short video %s: %s", vpath, exc)
+
+    # 2. Delete subtitles (.ass) if alongside
+    ass_file = vpath.with_suffix(".ass")
+    if ass_file.is_file():
+        try:
+            freed_bytes += ass_file.stat().st_size
+            ass_file.unlink(missing_ok=True)
+            deleted_items.append(ass_file.name)
+        except Exception:
+            pass
+
+    # 3. Delete work directory (raw clip, audio wav, temporary fonts)
+    stem = vpath.stem
+    if vpath.parent.name == "shorts":
+        work_dir = vpath.parent.parent / "work" / stem
+        if work_dir.is_dir():
+            try:
+                for f in work_dir.rglob("*"):
+                    if f.is_file():
+                        freed_bytes += f.stat().st_size
+                shutil.rmtree(work_dir, ignore_errors=True)
+                deleted_items.append(f"work/{stem}")
+            except Exception as exc:
+                LOGGER.warning("Could not remove work dir %s: %s", work_dir, exc)
+
+        # 4. Delete metadata json so it drops out of the local un-uploaded library
+        meta_json = vpath.parent.parent / "metadata" / f"{stem}.json"
+        if meta_json.is_file():
+            try:
+                freed_bytes += meta_json.stat().st_size
+                meta_json.unlink(missing_ok=True)
+                deleted_items.append(f"metadata/{stem}.json")
+            except Exception:
+                pass
+    elif vpath.with_suffix(".json").is_file():
+        try:
+            freed_bytes += vpath.with_suffix(".json").stat().st_size
+            vpath.with_suffix(".json").unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    freed_mb = round(freed_bytes / (1024 * 1024), 2)
+    LOGGER.info("Freed %.2f MB storage after YouTube upload: %s", freed_mb, stem)
+    return {
+        "freed_mb": freed_mb,
+        "deleted_items": deleted_items,
+    }
+
+
 class YouTubeQueueManager:
     """Thread-safe upload queue manager persisted to disk."""
 
@@ -263,6 +327,8 @@ class YouTubeQueueManager:
                     privacy=next_item["privacy"],
                     progress_callback=lambda pct: self._update_progress(item_id, pct),
                 )
+                # Free disk space: delete uploaded short and intermediate files from storage
+                cleanup_info = delete_uploaded_short_storage(next_item["video_path"])
                 with self._lock:
                     queue = self._load_locked()
                     for q in queue:
@@ -272,6 +338,8 @@ class YouTubeQueueManager:
                             q["video_id"] = result.get("video_id")
                             q["shorts_url"] = result.get("shorts_url")
                             q["uploaded_at"] = result.get("uploaded_at")
+                            q["deleted_from_storage"] = True
+                            q["freed_mb"] = cleanup_info.get("freed_mb", 0.0)
                             break
                     self._save_locked(queue)
             except Exception as exc:
