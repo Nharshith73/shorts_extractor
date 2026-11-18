@@ -23,7 +23,7 @@ from app.rendering.renderer import probe_media
 from app.rendering.transcription import WhisperTranscriber
 from app.vod.pipeline import run
 from app.vod.render import selected_clips, clip_transcript, render_clip
-from .boundaries import resolve_boundaries
+from .boundaries import resolve_boundaries, snap_to_speech_boundaries
 
 EXTENSIONS = {'.mp4', '.mkv', '.mov', '.webm', '.ts', '.mpegts'}
 ACTIVE = ('VALIDATING', 'ANALYZING', 'CONTEXT_EXTRACTION', 'AI_JUDGING', 'SHORTLIST_GENERATION', 'RENDERING')
@@ -248,9 +248,32 @@ def process_job(queue, row, provider, args):
     lookup = {r.candidate_id: r for r in records}
     for clip in selected_clips(work, ranks={int(c['rank']) for c in chosen}) if chosen else []:
         r = lookup[clip.metadata['window_id']]
-        boundary = resolve_boundaries(clip.start, clip.end, manifest['duration'], r.recommended_start_seconds,
-            r.recommended_end_seconds, r.confidence, r.context_complete, args.min_duration, args.max_duration,
-            args.boundary_confidence, args.boundary_refinement)
+        rec_start = r.recommended_start_seconds
+        rec_end = r.recommended_end_seconds
+
+        # Check speech segments to snap start/end to full sentence boundaries
+        ctx_file = work / 'context' / clip.metadata['window_id'] / 'context.json'
+        if ctx_file.is_file():
+            try:
+                ctx_data = json.loads(ctx_file.read_text(encoding='utf-8'))
+                speech_segs = ctx_data.get('speech', {}).get('segments', [])
+                if speech_segs:
+                    snapped_s, snapped_e = snap_to_speech_boundaries(
+                        clip.start, clip.end, clip.metadata.get('peak_seconds', clip.start), speech_segs,
+                        min_duration=args.min_duration, max_duration=args.max_duration
+                    )
+                    if abs(rec_start - clip.start) < 0.2:
+                        rec_start = snapped_s
+                    if abs(rec_end - clip.end) < 0.2:
+                        rec_end = snapped_e
+            except Exception as exc:
+                LOGGER.debug("Could not snap speech boundaries: %s", exc)
+
+        ctx_start = max(0.0, min(clip.start, rec_start) - 1.0)
+        ctx_end = min(manifest['duration'], max(clip.end, rec_end) + 1.0)
+        boundary = resolve_boundaries(clip.start, clip.end, manifest['duration'], rec_start,
+            rec_end, r.confidence, r.context_complete, args.min_duration, args.max_duration,
+            args.boundary_confidence, args.boundary_refinement, context_start=ctx_start, context_end=ctx_end)
         save(output / 'boundaries' / (clip.metadata['window_id'] + '.json'), boundary)
         clip = replace(clip, start=boundary['applied'][0], end=boundary['applied'][1])
         if not args.min_duration <= clip.end - clip.start <= args.max_duration:

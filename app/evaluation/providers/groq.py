@@ -13,6 +13,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import time
 from typing import Any, Sequence
 import urllib.parse
@@ -29,6 +30,54 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_GROQ_ENDPOINT = "https://api.groq.com/openai/v1"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
 DEFAULT_GROQ_VISION_MODEL = "openai/gpt-oss-20b"
+
+
+def parse_header_time(val: Any) -> float:
+    """Parse time expression from Groq rate limit headers (e.g. '5.437s', '832.5ms', '1m12s')."""
+    if not val:
+        return 0.0
+    text = str(val).strip()
+    m_ms = re.search(r"(\d+(?:\.\d+)?)\s*ms", text, re.I)
+    if m_ms:
+        return float(m_ms.group(1)) / 1000.0
+    m_s = re.search(
+        r"(?:(\d+(?:\.\d+)?)\s*m(?:in)?(?![a-z]))?\s*(?:(\d+(?:\.\d+)?)\s*s(?:ec)?)?",
+        text,
+        re.I,
+    )
+    if m_s:
+        mins = float(m_s.group(1)) if m_s.group(1) else 0.0
+        secs = float(m_s.group(2)) if m_s.group(2) else 0.0
+        total = mins * 60.0 + secs
+        if total > 0:
+            return total
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def parse_wait_seconds(body_text: str) -> float:
+    """Parse retry wait seconds from Groq 429 error messages."""
+    if not body_text:
+        return 2.0
+    # 1. Direct ms check
+    m_ms = re.search(r"try again in\s+(\d+(?:\.\d+)?)\s*ms", body_text, re.I)
+    if m_ms:
+        return float(m_ms.group(1)) / 1000.0
+    # 2. Minutes and seconds check
+    m_s = re.search(
+        r"try again in\s+(?:(\d+(?:\.\d+)?)\s*m(?:in)?(?![a-z]))?\s*(?:(\d+(?:\.\d+)?)\s*s(?:ec)?)?",
+        body_text,
+        re.I,
+    )
+    if m_s:
+        mins = float(m_s.group(1)) if m_s.group(1) else 0.0
+        secs = float(m_s.group(2)) if m_s.group(2) else 0.0
+        total = mins * 60.0 + secs
+        if total > 0:
+            return total
+    return 2.0
 
 
 def resolve_groq_api_key(explicit_key: str | None = None) -> str | None:
@@ -62,8 +111,9 @@ class GroqProviderConfig:
     max_output_tokens: int = 2048
     timeout_seconds: float = 45.0
     max_frames: int = 4
-    max_retries: int = 2
+    max_retries: int = 3
     use_vision: bool = False
+    inter_request_delay_seconds: float = 0.5
 
 
 class GroqHighlightJudgeProvider:
@@ -134,7 +184,17 @@ class GroqHighlightJudgeProvider:
         for attempt in range(1, self.config.max_retries + 1):
             try:
                 raw_json, telemetry = self._call_completion(messages, timeout_seconds=timeout_seconds)
-                parsed_data = json.loads(raw_json)
+
+                text_to_parse = raw_json.strip()
+                if text_to_parse.startswith("```"):
+                    lines = text_to_parse.splitlines()
+                    if lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    text_to_parse = "\n".join(lines).strip()
+
+                parsed_data = json.loads(text_to_parse)
                 parsed_data["candidate_id"] = context.candidate_id
                 telemetry["attempt"] = attempt
                 telemetry["total_latency_seconds"] = round(time.perf_counter() - start_time, 3)
@@ -152,10 +212,12 @@ class GroqHighlightJudgeProvider:
                 )
                 last_error = exc
                 if attempt < self.config.max_retries:
+                    # Clean re-prompt without unbounded token growth
+                    messages = self._build_prompt_messages(context)
                     messages.append(
                         {
                             "role": "user",
-                            "content": f"Schema error: {exc}. Return ONLY valid JSON matching schema.",
+                            "content": f"Schema error on previous attempt: {exc}. Return ONLY the strict JSON object matching the required schema.",
                         }
                     )
                     time.sleep(1.0)
@@ -180,41 +242,84 @@ class GroqHighlightJudgeProvider:
             "response_format": {"type": "json_object"},
         }
 
-        call_start = time.perf_counter()
-        response = self._http_client.post(url, headers=headers, json=payload, timeout=timeout_seconds)
-        latency = round(time.perf_counter() - call_start, 3)
+        max_rate_limit_retries = 8
+        for rl_attempt in range(1, max_rate_limit_retries + 1):
+            call_start = time.perf_counter()
+            response = self._http_client.post(url, headers=headers, json=payload, timeout=timeout_seconds)
+            latency = round(time.perf_counter() - call_start, 3)
 
-        if response.status_code != 200:
-            raise RuntimeError(f"Groq API error {response.status_code}: {response.text[:300]}")
+            if response.status_code == 429:
+                wait_time = 2.0
+                retry_header = response.headers.get("retry-after")
+                if retry_header:
+                    wait_time = parse_header_time(retry_header)
+                elif "x-ratelimit-reset-tokens" in response.headers:
+                    wait_time = parse_header_time(response.headers["x-ratelimit-reset-tokens"])
+                else:
+                    wait_time = parse_wait_seconds(response.text)
 
-        resp_data = response.json()
-        choices = resp_data.get("choices", [])
-        if not choices:
-            raise ValueError(f"No choices returned by Groq: {resp_data}")
+                wait_time = max(wait_time, 0.5) + 0.5  # Add 500ms safety cushion
+                LOGGER.warning(
+                    "Groq TPM/RPM rate limit encountered (429). Backing off for %.2fs (attempt %d/%d)...",
+                    wait_time,
+                    rl_attempt,
+                    max_rate_limit_retries,
+                )
+                time.sleep(wait_time)
+                continue
 
-        content = choices[0].get("message", {}).get("content", "")
-        usage = resp_data.get("usage", {})
-        prompt_tokens = usage.get("prompt_tokens", 0)
-        completion_tokens = usage.get("completion_tokens", 0)
+            if response.status_code != 200:
+                raise RuntimeError(f"Groq API error {response.status_code}: {response.text[:300]}")
 
-        telemetry = {
-            "latency_seconds": latency,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "tokens_per_second": round(completion_tokens / max(latency, 0.001), 2),
-        }
-        return content, telemetry
+            resp_data = response.json()
+            choices = resp_data.get("choices", [])
+            if not choices:
+                raise ValueError(f"No choices returned by Groq: {resp_data}")
+
+            content = choices[0].get("message", {}).get("content", "")
+            usage = resp_data.get("usage", {})
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+
+            telemetry = {
+                "latency_seconds": latency,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "tokens_per_second": round(completion_tokens / max(latency, 0.001), 2),
+            }
+
+            # Proactive token pacing: check remaining tokens in current window
+            rem_tokens_str = response.headers.get("x-ratelimit-remaining-tokens")
+            if rem_tokens_str and rem_tokens_str.isdigit():
+                rem_tokens = int(rem_tokens_str)
+                if rem_tokens < 1500:
+                    reset_tokens_str = response.headers.get("x-ratelimit-reset-tokens")
+                    reset_time = parse_header_time(reset_tokens_str) if reset_tokens_str else 2.0
+                    if 0 < reset_time <= 10.0:
+                        LOGGER.info(
+                            "Groq remaining tokens low (%d < 1500). Proactively pausing %.2fs for TPM window reset...",
+                            rem_tokens,
+                            reset_time + 0.5,
+                        )
+                        time.sleep(reset_time + 0.5)
+
+            return content, telemetry
+
+        raise RuntimeError(f"Exceeded {max_rate_limit_retries} retries due to persistent Groq rate limits (429).")
 
     def _build_prompt_messages(self, context: CandidateContext) -> list[dict[str, Any]]:
         system_prompt = (
-            "You are an expert viral content editor evaluating candidate moments for YouTube Shorts.\n"
-            "Your job is to identify genuinely entertaining, hilarious, chaotic, skillful, or dramatic moments.\n\n"
-            "CRITICAL RULES:\n"
-            "1. Ground all judgments in observable evidence: visuals, spoken dialogue, and audio energy.\n"
-            "2. Never hallucinate dialogue, spoken words, or events not present in the video/audio.\n"
-            "3. Driving in a car with no commentary or action is BORING and MUST receive a rating of 0 or 1.\n"
-            "4. Reserve high ratings (4-5) strictly for genuine laughter, hilarious fails, loud reactions, clutch gameplay, or great comedic banter.\n"
-            "5. Output MUST be a strictly valid JSON object matching this schema:\n"
+            "You are an expert viral content editor evaluating candidate moments for YouTube Shorts & Instagram Reels from gaming streams.\n"
+            "Your goal is pinpoint accuracy: identifying hilarious player banter, funny NPC encounters, chaotic gameplay fails, and authentic reactions.\n\n"
+            "EDITORIAL SCORING RULES:\n"
+            "1. COMEDIC BANTER & SURPRISE (Rating 3 to 5): Streamer teasing, funny character appearances (e.g. guy with suspenders, weird NPCs), loud laughter, unexpected physics/fails, frantic shouting, or intense action. Rate these 3, 4, or 5 stars.\n"
+            "2. MUNDANE / BORING (Rating 0 to 1): Silent driving, routine navigation with no jokes or banter, ordinary transit with no action.\n"
+            "3. Ground all judgments in observable evidence: visuals, spoken dialogue, and audio energy. Never hallucinate events.\n"
+            "4. BOUNDARY TIMESTAMPS:\n"
+            "   - Inspect the speech transcript timestamps below.\n"
+            "   - Set recommended_start_seconds to the exact beginning of the spoken thought or joke (never cut mid-sentence).\n"
+            "   - Set recommended_end_seconds to the clean end of the punchline, laughter, or exclamation.\n\n"
+            "Output MUST be a strictly valid JSON object matching this schema:\n"
             "{\n"
             '  "schema_version": "1.0",\n'
             f'  "candidate_id": "{context.candidate_id}",\n'
@@ -243,15 +348,18 @@ class GroqHighlightJudgeProvider:
             s for s in context.speech.segments
             if s.avg_logprob >= -1.2 and s.no_speech_prob <= 0.65
         ] if context.speech.has_speech else []
-        transcript_text = " ".join(s.text for s in valid_segments) if valid_segments else "(No dialogue detected)"
+        transcript_lines = []
+        for s in valid_segments:
+            transcript_lines.append(f"  [{s.start:.2f}s - {s.end:.2f}s]: \"{s.text}\"")
+        transcript_text = "\n".join(transcript_lines) if transcript_lines else "(No dialogue detected)"
         signals_summary = ", ".join(f"{k}={v:.2f}" for k, v in context.components.items())
 
         text_intro = (
             f"EVALUATION REQUEST:\n"
             f"- Candidate ID: {context.candidate_id}\n"
             f"- Time Interval: {context.start_seconds:.2f}s to {context.end_seconds:.2f}s (Duration: {context.duration_seconds:.2f}s, Peak: {context.peak_seconds:.2f}s)\n"
-            f"- Signal Detector Features: {signals_summary} (Raw Score: {context.candidate_score:.2f})\n"
-            f"- Speech Transcript: {transcript_text}\n"
+            f"- Signal Features: {signals_summary} (Raw Score: {context.candidate_score:.2f})\n"
+            f"- Speech Transcript with Timestamps:\n{transcript_text}\n"
         )
 
         if not self.config.use_vision:

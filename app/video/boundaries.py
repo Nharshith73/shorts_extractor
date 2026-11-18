@@ -1,5 +1,61 @@
 """Resolve source-relative AI boundary recommendations conservatively."""
 import math
+from typing import Any, Sequence
+
+
+def snap_to_speech_boundaries(
+    start: float,
+    end: float,
+    peak: float,
+    segments: Sequence[Any],
+    min_duration: float = 15.0,
+    max_duration: float = 45.0,
+    max_lookback: float = 8.0,
+    max_lookforward: float = 8.0,
+) -> tuple[float, float]:
+    """Snap candidate window boundaries to sentence beginnings and punchline ends.
+    
+    Prevents cutting speakers off mid-word or mid-sentence and ensures the comedic
+    or dramatic setup is fully included.
+    """
+    if not segments:
+        return start, end
+
+    # 1. Look back from start to find where this sentence/thought began
+    best_start = start
+    lookback_floor = max(0.0, start - max_lookback)
+    for s in segments:
+        s_start = float(getattr(s, "start", 0.0) if hasattr(s, "start") else (s.get("start", 0.0) if isinstance(s, dict) else 0.0))
+        s_end = float(getattr(s, "end", 0.0) if hasattr(s, "end") else (s.get("end", 0.0) if isinstance(s, dict) else 0.0))
+        if lookback_floor <= s_start <= start + 1.0:
+            best_start = s_start
+            break
+        elif s_start < lookback_floor and s_end > lookback_floor:
+            words = getattr(s, "words", []) if hasattr(s, "words") else (s.get("words", []) if isinstance(s, dict) else [])
+            for w in words:
+                w_start = float(getattr(w, "start", 0.0) if hasattr(w, "start") else (w.get("start", 0.0) if isinstance(w, dict) else 0.0))
+                if lookback_floor <= w_start <= start + 0.5:
+                    best_start = w_start
+                    break
+
+    # 2. Look forward from end to find where the sentence/reaction ends
+    best_end = end
+    lookforward_ceiling = end + max_lookforward
+    for s in reversed(segments):
+        s_start = float(getattr(s, "start", 0.0) if hasattr(s, "start") else (s.get("start", 0.0) if isinstance(s, dict) else 0.0))
+        s_end = float(getattr(s, "end", 0.0) if hasattr(s, "end") else (s.get("end", 0.0) if isinstance(s, dict) else 0.0))
+        if end - 1.0 <= s_end <= lookforward_ceiling:
+            best_end = s_end
+            break
+
+    # 3. Enforce adaptive bounds [min_duration, max_duration]
+    dur = best_end - best_start
+    if dur < min_duration:
+        best_end = best_start + min_duration
+    elif dur > max_duration:
+        best_end = best_start + max_duration
+
+    return round(best_start, 2), round(best_end, 2)
 
 
 def resolve_boundaries(start, end, duration, recommended_start, recommended_end, confidence,

@@ -24,7 +24,7 @@ import threading
 import time
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -81,6 +81,165 @@ def list_inbox_videos() -> list[dict[str, Any]]:
 @app.get("/api/videos")
 def api_videos():
     return {"videos": list_inbox_videos()}
+
+
+@app.delete("/api/videos")
+def api_delete_all_videos():
+    deleted = []
+    if INBOX_DIR.is_dir():
+        for p in INBOX_DIR.glob("*"):
+            if p.is_file():
+                try:
+                    p.unlink()
+                    deleted.append(p.name)
+                except Exception:
+                    pass
+    return {"status": "DELETED_ALL", "deleted": deleted}
+
+
+@app.delete("/api/videos/{filename}")
+def api_delete_video(filename: str):
+    file_path = INBOX_DIR / filename
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Video file not found in inbox")
+    try:
+        file_path.unlink()
+        return {"status": "DELETED", "filename": filename}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to delete video: {exc}")
+
+
+@app.post("/api/upload")
+async def api_upload_video(file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Empty filename provided")
+    safe_name = Path(file.filename).name
+    target = INBOX_DIR / safe_name
+    INBOX_DIR.mkdir(parents=True, exist_ok=True)
+    with open(target, "wb") as buffer:
+        while chunk := await file.read(1024 * 1024 * 4):
+            buffer.write(chunk)
+    return {
+        "status": "UPLOADED",
+        "filename": safe_name,
+        "size_mb": round(target.stat().st_size / (1024 * 1024), 2),
+    }
+
+
+@app.delete("/api/jobs/{source_id}")
+def api_delete_job(source_id: str):
+    comp = COMPLETED_DIR / source_id
+    if comp.is_dir():
+        shutil.rmtree(comp, ignore_errors=True)
+    proc = PROCESSING_DIR / source_id
+    if proc.is_dir():
+        shutil.rmtree(proc, ignore_errors=True)
+    for k in list(ACTIVE_TASKS.keys()):
+        if k == source_id or source_id in str(ACTIVE_TASKS.get(k, {})):
+            ACTIVE_TASKS.pop(k, None)
+    if DB_PATH.is_file():
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM jobs WHERE source_id=?", (source_id,))
+            conn.execute("DELETE FROM history WHERE source_id=?", (source_id,))
+            conn.commit()
+        finally:
+            conn.close()
+    return {"status": "DELETED", "source_id": source_id}
+
+
+class CleanupRequest(BaseModel):
+    clear_processing: bool = True
+    clear_completed: bool = False
+    clear_inbox: bool = False
+    reset_db: bool = False
+
+
+@app.post("/api/cleanup")
+def api_cleanup(req: CleanupRequest):
+    cleaned = []
+    if req.clear_processing and PROCESSING_DIR.exists():
+        for item in PROCESSING_DIR.iterdir():
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                try: item.unlink()
+                except Exception: pass
+        cleaned.append("processing_temp_files")
+
+    if req.clear_completed and COMPLETED_DIR.exists():
+        for item in COMPLETED_DIR.iterdir():
+            if item.is_dir():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                try: item.unlink()
+                except Exception: pass
+        cleaned.append("completed_shorts")
+
+    if req.clear_inbox and INBOX_DIR.exists():
+        for item in INBOX_DIR.glob("*"):
+            if item.is_file():
+                try: item.unlink()
+                except Exception: pass
+        cleaned.append("inbox_videos")
+
+    if req.reset_db and DB_PATH.is_file():
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM jobs")
+            conn.execute("DELETE FROM history")
+            conn.commit()
+            cleaned.append("database_history")
+        finally:
+            conn.close()
+
+    ACTIVE_TASKS.clear()
+    return {"status": "CLEANED", "cleaned": cleaned}
+
+
+@app.delete("/api/shorts")
+def api_delete_short(path: str = Query(...)):
+    target = Path(path).resolve()
+    if not str(target).startswith(str(DATA_DIR.resolve())):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Short not found")
+    try:
+        target.unlink()
+        return {"status": "DELETED", "filename": target.name}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/tasks/dismiss")
+def api_dismiss_tasks(task_id: str | None = None):
+    if task_id and task_id in ACTIVE_TASKS:
+        ACTIVE_TASKS.pop(task_id, None)
+    else:
+        ACTIVE_TASKS.clear()
+    return {"status": "DISMISSED"}
+
+
+@app.post("/api/tasks/stop")
+def api_stop_tasks(task_id: str | None = None):
+    targets = [task_id] if task_id and task_id in ACTIVE_TASKS else list(ACTIVE_TASKS.keys())
+    stopped = []
+    for tid in targets:
+        task = ACTIVE_TASKS.get(tid)
+        if task and "proc" in task:
+            try:
+                proc = task["proc"]
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=2)
+                    except Exception:
+                        proc.kill()
+                    stopped.append(tid)
+            except Exception as e:
+                LOGGER.warning("Failed to stop process %s: %s", tid, e)
+            task["status"] = "STOPPED"
+    return {"status": "STOPPED", "stopped": stopped}
 
 
 @app.get("/api/jobs")
@@ -173,6 +332,7 @@ def api_job_detail(source_id: str):
 
                 shorts.append({
                     "filename": mp4.name,
+                    "path": str(mp4),
                     "url": f"/media/file?path={urllib_quote(str(mp4))}",
                     "preview_url": f"/media/file?path={urllib_quote(str(preview_file))}" if preview_file.is_file() else None,
                     "size_mb": round(mp4.stat().st_size / (1024 * 1024), 2),
@@ -213,6 +373,10 @@ def api_job_detail(source_id: str):
         # Active background status
         if source_id in ACTIVE_TASKS:
             job_data["active_progress"] = ACTIVE_TASKS[source_id]
+        else:
+            stem = Path(job_data["source_path"]).stem
+            if stem in ACTIVE_TASKS:
+                job_data["active_progress"] = ACTIVE_TASKS[stem]
 
         return job_data
     finally:
@@ -276,12 +440,13 @@ class ProcessRequest(BaseModel):
     video_path: str
     creator: str | None = None
     source_url: str | None = None
-    provider: str = "local-qwen"  # 'local-qwen' or 'groq'
+    provider: str = "groq"  # 'groq' or 'local-qwen'
     max_candidates: int = 10
     max_shorts: int = 3
     min_shorts: int = 1
     min_score: int = 3
     encoder: str = "auto"
+    layout: str = "blurred_background"
 
 
 def run_pipeline_worker(source_path: Path, req: ProcessRequest, source_id_holder: list[str]):
@@ -309,6 +474,8 @@ def run_pipeline_worker(source_path: Path, req: ProcessRequest, source_id_holder
         req.encoder,
         "--force",
     ]
+    if req.layout:
+        cmd.extend(["--layout", req.layout])
     if req.creator:
         cmd.extend(["--creator", req.creator])
     if req.source_url:
@@ -331,6 +498,7 @@ def run_pipeline_worker(source_path: Path, req: ProcessRequest, source_id_holder
         "command": cmd,
         "logs": log_lines,
         "started_at": datetime.now(timezone.utc).isoformat(),
+        "proc": proc,
     }
 
     try:
@@ -358,6 +526,19 @@ def api_process_video(req: ProcessRequest, bg: BackgroundTasks):
             video_path = inbox_cand
         else:
             raise HTTPException(status_code=400, detail=f"File not found: {req.video_path}")
+
+    task_id = video_path.stem
+    # Guard against duplicate concurrent worker collisions
+    if task_id in ACTIVE_TASKS and ACTIVE_TASKS[task_id].get("status") == "RUNNING":
+        return {
+            "status": "RUNNING",
+            "task_id": task_id,
+            "video": str(video_path),
+            "message": "Pipeline is already actively running for this video.",
+        }
+
+    # Automatically enforce max_shorts >= min_shorts
+    req.max_shorts = max(req.max_shorts, req.min_shorts)
 
     source_id_holder = []
     thread = threading.Thread(
@@ -438,10 +619,19 @@ def api_download_video(req: DownloadRequest):
 @app.get("/api/settings")
 def api_get_settings():
     groq_key = resolve_groq_api_key()
+    safe_tasks = {}
+    for k, v in ACTIVE_TASKS.items():
+        safe_tasks[k] = {
+            "status": v.get("status"),
+            "logs": v.get("logs", []),
+            "started_at": v.get("started_at"),
+            "returncode": v.get("returncode"),
+            "error": v.get("error"),
+        }
     return {
         "groq_configured": bool(groq_key and len(groq_key) > 10),
         "groq_key_masked": f"{groq_key[:6]}...{groq_key[-4:]}" if groq_key else None,
-        "active_tasks": ACTIVE_TASKS,
+        "active_tasks": safe_tasks,
     }
 
 
@@ -484,9 +674,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding-bottom: 24px;
+      padding-bottom: 20px;
       border-bottom: 1px solid #e5e7eb;
-      margin-bottom: 28px;
+      margin-bottom: 26px;
     }
     .brand {
       display: flex;
@@ -494,9 +684,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       gap: 12px;
     }
     .brand h1 {
-      font-size: 18px;
-      font-weight: 600;
-      letter-spacing: -0.01em;
+      font-size: 19px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #111827;
     }
     .badge {
       display: inline-flex;
@@ -512,14 +703,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .badge-success { background: #ecfdf5; color: #065f46; border-color: #a7f3d0; }
     .badge-active { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
     .badge-rating { background: #fef3c7; color: #92400e; border-color: #fde68a; font-weight: 600; }
+    .badge-danger { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
 
     .grid-2 {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 24px;
-      margin-bottom: 28px;
+      margin-bottom: 26px;
     }
-    @media (max-width: 800px) {
+    @media (max-width: 840px) {
       .grid-2 { grid-template-columns: 1fr; }
     }
 
@@ -530,8 +728,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       padding: 20px;
     }
     .card-title {
-      font-size: 13px;
-      font-weight: 600;
+      font-size: 12px;
+      font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.05em;
       color: #6b7280;
@@ -544,9 +742,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     label {
       display: block;
       font-size: 12px;
-      font-weight: 500;
+      font-weight: 600;
       color: #374151;
-      margin-bottom: 6px;
+      margin-bottom: 5px;
     }
     input, select {
       width: 100%;
@@ -557,9 +755,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: #ffffff;
       color: #111827;
       outline: none;
+      transition: border-color 0.15s;
     }
     input:focus, select:focus {
       border-color: #111827;
+    }
+    .field-hint {
+      display: block;
+      font-size: 11px;
+      color: #6b7280;
+      margin-top: 3px;
     }
 
     .row {
@@ -572,7 +777,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      padding: 9px 16px;
+      padding: 8px 14px;
       background: #111827;
       color: #ffffff;
       border: 1px solid #111827;
@@ -580,10 +785,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       font-size: 13px;
       font-weight: 500;
       cursor: pointer;
-      transition: background 0.15s;
+      transition: all 0.15s;
     }
     button:hover {
       background: #27272a;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
     }
     button.secondary {
       background: #ffffff;
@@ -592,6 +801,44 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     button.secondary:hover {
       background: #f9fafb;
+      border-color: #9ca3af;
+    }
+    button.btn-xs {
+      padding: 4px 8px;
+      font-size: 11px;
+      border-radius: 4px;
+    }
+    button.btn-danger-subtle {
+      background: #ffffff;
+      color: #dc2626;
+      border: 1px solid #fca5a5;
+    }
+    button.btn-danger-subtle:hover {
+      background: #fef2f2;
+      border-color: #ef4444;
+    }
+    button.btn-danger {
+      background: #dc2626;
+      color: #ffffff;
+      border: 1px solid #dc2626;
+    }
+    button.btn-danger:hover {
+      background: #b91c1c;
+    }
+
+    /* Dropzone */
+    .dropzone {
+      border: 2px dashed #d1d5db;
+      border-radius: 6px;
+      padding: 14px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.15s;
+      background: #fafafa;
+    }
+    .dropzone:hover, .dropzone.dragover {
+      border-color: #111827;
+      background: #f3f4f6;
     }
 
     /* Status Bar */
@@ -626,11 +873,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: #ffffff;
       border: 1px solid #e5e7eb;
       border-radius: 4px;
-      font-family: monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 11px;
-      color: #4b5563;
-      padding: 8px 12px;
-      max-height: 110px;
+      color: #374151;
+      padding: 10px 12px;
+      max-height: 120px;
       overflow-y: auto;
       white-space: pre-wrap;
     }
@@ -672,7 +919,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       gap: 8px;
     }
     .short-hook {
-      font-weight: 600;
+      font-weight: 700;
       font-size: 14px;
       line-height: 1.35;
       color: #111827;
@@ -693,8 +940,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     .short-actions {
       display: flex;
-      gap: 8px;
-      margin-top: 8px;
+      gap: 6px;
+      margin-top: 6px;
     }
     .short-actions a {
       flex: 1;
@@ -707,6 +954,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       text-decoration: none;
       color: #111827;
       background: #ffffff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
     }
     .short-actions a:hover {
       background: #f9fafb;
@@ -724,7 +974,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       padding: 8px 12px;
       background: #f9fafb;
       color: #6b7280;
-      font-weight: 500;
+      font-weight: 600;
       border-bottom: 1px solid #e5e7eb;
     }
     td {
@@ -733,6 +983,59 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       color: #374151;
     }
     tr:last-child td { border-bottom: none; }
+
+    /* Modals */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(17, 24, 39, 0.4);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .modal-card {
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      width: 100%;
+      max-width: 520px;
+      padding: 22px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+    .btn-close {
+      background: transparent;
+      border: none;
+      font-size: 20px;
+      line-height: 1;
+      cursor: pointer;
+      color: #9ca3af;
+      padding: 2px 6px;
+    }
+    .btn-close:hover {
+      color: #111827;
+    }
+    .checkbox-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 12px;
+      cursor: pointer;
+      font-weight: normal;
+      color: #374151;
+    }
+    .checkbox-row input[type="checkbox"] {
+      width: auto;
+      margin-top: 2px;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
@@ -741,10 +1044,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="brand">
         <h1>StreamClip Studio</h1>
         <span class="badge" id="gpu-pill">RTX 4070 Ready</span>
-        <span class="badge" id="groq-pill">Groq Free Tier</span>
+        <span class="badge" id="groq-pill" onclick="openSettingsModal()" style="cursor: pointer;" title="Click to view/set Groq API Key">Groq Free Tier</span>
       </div>
-      <div>
-        <button class="secondary" onclick="refreshDashboard()" style="padding: 6px 12px; font-size: 12px;">Refresh</button>
+      <div class="header-actions">
+        <button class="secondary" onclick="refreshDashboard()" title="Refresh All Data">
+          Refresh
+        </button>
+        <button class="secondary" onclick="openSettingsModal()" title="Groq API Key Settings">
+          Groq Key
+        </button>
+        <button class="secondary btn-danger-subtle" onclick="openCleanupModal()" title="Clean Storage, Videos & DB">
+          Storage & Reset
+        </button>
       </div>
     </header>
 
@@ -752,13 +1063,37 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <div class="grid-2">
       <!-- Select or Ingest Video -->
       <div class="card">
-        <div class="card-title">1. Select Video</div>
+        <div class="card-title">1. Select Video & Ingestion</div>
+        
         <div class="form-group">
-          <label for="video-select">Inbox Video</label>
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+            <label for="video-select" style="margin-bottom: 0;">Inbox Video</label>
+            <div style="display: flex; gap: 6px;">
+              <button class="btn-xs btn-danger-subtle" onclick="deleteSelectedVideo()" title="Delete this video from inbox">Delete Video</button>
+              <button class="btn-xs secondary" onclick="clearAllVideos()" title="Delete all videos from inbox">Clear All</button>
+            </div>
+          </div>
           <select id="video-select" onchange="onVideoSelected()">
             <option value="">Loading videos...</option>
           </select>
         </div>
+
+        <!-- Direct Upload Dropzone -->
+        <div class="form-group">
+          <label>Upload Video from Computer</label>
+          <div id="dropzone" class="dropzone" onclick="document.getElementById('file-uploader').click()">
+            <input type="file" id="file-uploader" accept="video/mp4,video/x-matroska,video/quicktime,video/webm" style="display:none">
+            <div style="font-size: 13px; font-weight: 500; color: #374151;">📁 Drop video file here or click to browse</div>
+            <div style="font-size: 11px; color: #9ca3af; margin-top: 2px;">MP4, MKV, MOV, WebM (auto-saved to data/inbox)</div>
+          </div>
+          <div id="upload-progress-container" style="display: none; margin-top: 8px;">
+            <div class="progress-bar-bg" style="margin-bottom: 4px;">
+              <div class="progress-bar-fill" id="upload-progress-bar" style="width: 0%;"></div>
+            </div>
+            <div style="font-size: 11px; color: #4b5563;" id="upload-progress-text">Uploading...</div>
+          </div>
+        </div>
+
         <div class="form-group">
           <label for="yt-url">Or Download from YouTube</label>
           <div style="display: flex; gap: 8px;">
@@ -766,7 +1101,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <button class="secondary" onclick="downloadYoutube()" style="white-space: nowrap;">Fetch</button>
           </div>
         </div>
-        <div class="form-group" style="margin-top: 18px;">
+
+        <div class="form-group" style="margin-bottom: 0;">
           <label for="creator-name">Creator / Streamer Identity</label>
           <input type="text" id="creator-name" placeholder="RawRawKnee" value="RawRawKnee">
         </div>
@@ -774,33 +1110,56 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
       <!-- Pipeline Configuration -->
       <div class="card">
-        <div class="card-title">2. AI Highlight Settings</div>
+        <div class="card-title">2. AI Highlight & Render Settings</div>
+        
         <div class="form-group">
           <label for="provider-select">Highlight Judge Provider</label>
           <select id="provider-select">
+            <option value="groq" selected>Groq Cloud (Llama 3.3 70B & Vision, Free Tier)</option>
             <option value="local-qwen">Local Qwen2.5-VL-7B (RTX 4070 GPU, Free Offline)</option>
-            <option value="groq">Groq Cloud (Llama 3.3 70B & Vision, Free Tier)</option>
           </select>
         </div>
+
+        <div class="row">
+          <div class="form-group">
+            <label for="layout-select">Vertical 9:16 Layout</label>
+            <select id="layout-select">
+              <option value="blurred_background" selected>Blurred Background (Reels Standard)</option>
+              <option value="stacked">Stacked 9:16 (Top/Bottom Split)</option>
+              <option value="center_crop">Center Crop 9:16</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="encoder-select">Video Encoder</label>
+            <select id="encoder-select">
+              <option value="auto" selected>Auto (Hardware NVENC if available)</option>
+              <option value="h264_nvenc">NVIDIA NVENC (RTX 4070 Ultra Fast)</option>
+              <option value="libx264">CPU libx264 (Software)</option>
+            </select>
+          </div>
+        </div>
+
         <div class="row">
           <div class="form-group">
             <label for="min-shorts">Minimum Shorts (Guaranteed)</label>
             <input type="number" id="min-shorts" min="1" max="10" value="2">
-            <span style="display: block; font-size: 11px; color: #6b7280; margin-top: 3px;">Guarantees at least this many clips</span>
+            <span class="field-hint">Guarantees at least this many clips</span>
           </div>
           <div class="form-group">
             <label for="max-shorts">Maximum Shorts (Cap)</label>
             <input type="number" id="max-shorts" min="1" max="15" value="3">
-            <span style="display: block; font-size: 11px; color: #6b7280; margin-top: 3px;">Maximum clips to produce</span>
+            <span class="field-hint">Maximum clips to produce</span>
           </div>
           <div class="form-group">
             <label for="min-score">Target Quality</label>
             <input type="number" id="min-score" min="1" max="5" value="3">
-            <span style="display: block; font-size: 11px; color: #6b7280; margin-top: 3px;">Min star rating threshold</span>
+            <span class="field-hint">Min star rating threshold (1-5)</span>
           </div>
         </div>
-        <div class="form-group" style="margin-top: 8px;">
-          <button style="width: 100%;" onclick="startProcessing()">Extract Real Shorts</button>
+
+        <div style="display: flex; gap: 8px; margin-top: 10px;">
+          <button style="flex: 2;" id="btn-extract" onclick="startProcessing()">Extract Real Shorts</button>
+          <button class="secondary btn-danger-subtle" id="btn-stop" style="flex: 1; display: none;" onclick="stopActivePipeline()">Stop Pipeline</button>
         </div>
       </div>
     </div>
@@ -808,8 +1167,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- Live Status / Progress Panel -->
     <div class="status-panel" id="status-panel">
       <div class="status-header">
-        <span style="font-weight: 600; font-size: 13px;" id="status-title">Ready</span>
-        <span class="badge badge-active" id="status-badge">Idle</span>
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span style="font-weight: 600; font-size: 13px;" id="status-title">Ready</span>
+          <span class="badge" id="status-badge">Idle</span>
+        </div>
+        <div style="display: flex; gap: 6px;">
+          <button class="btn-xs secondary" onclick="dismissStatus()" title="Dismiss this status from view">Dismiss Status</button>
+          <button class="btn-xs btn-danger-subtle" onclick="deleteCurrentJob()" title="Delete job runs and reset database record">Delete Job Output</button>
+        </div>
       </div>
       <div class="progress-bar-bg">
         <div class="progress-bar-fill" id="progress-bar"></div>
@@ -818,10 +1183,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
 
     <!-- Completed Shorts Gallery -->
-    <div style="margin-bottom: 12px; display: flex; justify-content: space-between; align-items: flex-end;">
+    <div style="margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center;">
       <div>
-        <h2 style="font-size: 16px; font-weight: 600;">Generated Shorts (9:16 Vertical)</h2>
+        <h2 style="font-size: 16px; font-weight: 700;">Generated Shorts (9:16 Vertical)</h2>
         <p style="font-size: 12px; color: #6b7280;" id="shorts-summary">0 clips generated</p>
+      </div>
+      <div>
+        <button class="btn-xs secondary btn-danger-subtle" onclick="clearCurrentShorts()" id="btn-clear-shorts" style="display: none;">Clear All Shorts</button>
       </div>
     </div>
     <div class="shorts-grid" id="shorts-grid">
@@ -838,7 +1206,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <th>Timestamp</th>
               <th>Category</th>
               <th>AI Rating</th>
-              <th>Editorial Summary</th>
+              <th>Editorial Summary & Hook</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -852,18 +1220,170 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
   </div>
 
+  <!-- Storage & Reset Modal -->
+  <div id="cleanup-modal" class="modal-backdrop">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 style="font-size: 15px; font-weight: 700;">Storage & Clean Slate</h3>
+        <button class="btn-close" onclick="closeCleanupModal()">&times;</button>
+      </div>
+      <div style="font-size: 13px; color: #4b5563; margin-bottom: 16px;">
+        Select which storage areas to clean, or choose total reset to wipe everything back to a fresh state.
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px;">
+        <label class="checkbox-row">
+          <input type="checkbox" id="clean-processing" checked>
+          <span><strong>Processing Temp Files</strong> (<code>data/processing/</code> intermediate chunks & frames)</span>
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" id="clean-completed">
+          <span><strong>Completed Shorts</strong> (<code>data/completed/</code> rendered vertical reels)</span>
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" id="clean-inbox">
+          <span><strong>Inbox Source Videos</strong> (<code>data/inbox/</code> uploaded and downloaded VODs)</span>
+        </label>
+        <label class="checkbox-row">
+          <input type="checkbox" id="clean-db">
+          <span><strong>Reset Database History</strong> (Clear all entries in <code>video_jobs.sqlite3</code>)</span>
+        </label>
+      </div>
+      <div style="display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #e5e7eb; padding-top: 16px;">
+        <button class="secondary btn-danger-subtle" onclick="executeCleanup(true)">Total Wipe (Reset All)</button>
+        <div style="display: flex; gap: 8px;">
+          <button class="secondary" onclick="closeCleanupModal()">Cancel</button>
+          <button onclick="executeCleanup(false)">Clean Selected</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Groq Settings Modal -->
+  <div id="settings-modal" class="modal-backdrop">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 style="font-size: 15px; font-weight: 700;">Groq Cloud API Key</h3>
+        <button class="btn-close" onclick="closeSettingsModal()">&times;</button>
+      </div>
+      <div style="font-size: 13px; color: #4b5563; margin-bottom: 14px;">
+        Groq provides free high-speed Llama 3.3 70B & Vision Highlight Judging (8,000 TPM limit). The pipeline includes automatic backoff and retry handling.
+      </div>
+      <div class="form-group">
+        <label>Current Status</label>
+        <div id="groq-current-status" style="font-size: 12px; font-weight: 500; color: #374151; padding: 6px 10px; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 4px; margin-bottom: 12px;">Checking...</div>
+      </div>
+      <div class="form-group">
+        <label for="groq-key-input">Groq API Key (<code>gsk_...</code>)</label>
+        <input type="password" id="groq-key-input" placeholder="gsk_..." autocomplete="off">
+        <span class="field-hint">Stored safely in your local environment.</span>
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid #e5e7eb; padding-top: 16px; margin-top: 16px;">
+        <button class="secondary" onclick="closeSettingsModal()">Close</button>
+        <button onclick="saveGroqKey()">Save Key</button>
+      </div>
+    </div>
+  </div>
+
   <script>
-    let activePoll = null;
     let currentJobId = null;
 
     async function init() {
+      setupDragAndDrop();
+      setupMinMaxSync();
       await loadVideos();
       await loadSettings();
       await pollStatus();
       setInterval(pollStatus, 3000);
     }
 
-    async function loadVideos() {
+    function setupMinMaxSync() {
+      const minEl = document.getElementById('min-shorts');
+      const maxEl = document.getElementById('max-shorts');
+      if (minEl && maxEl) {
+        minEl.addEventListener('input', () => {
+          const minV = parseInt(minEl.value, 10) || 1;
+          const maxV = parseInt(maxEl.value, 10) || 1;
+          if (maxV < minV) maxEl.value = minV;
+        });
+        maxEl.addEventListener('input', () => {
+          const minV = parseInt(minEl.value, 10) || 1;
+          const maxV = parseInt(maxEl.value, 10) || 1;
+          if (maxV < minV) minEl.value = maxV;
+        });
+      }
+    }
+
+    function setupDragAndDrop() {
+      const dropzone = document.getElementById('dropzone');
+      const fileInput = document.getElementById('file-uploader');
+
+      dropzone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropzone.classList.add('dragover');
+      });
+
+      dropzone.addEventListener('dragleave', (e) => {
+        e.preventDefault();
+        dropzone.classList.remove('dragover');
+      });
+
+      dropzone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropzone.classList.remove('dragover');
+        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+          uploadFile(e.dataTransfer.files[0]);
+        }
+      });
+
+      fileInput.addEventListener('change', () => {
+        if (fileInput.files && fileInput.files.length > 0) {
+          uploadFile(fileInput.files[0]);
+        }
+      });
+    }
+
+    function uploadFile(file) {
+      const pcontainer = document.getElementById('upload-progress-container');
+      const pbar = document.getElementById('upload-progress-bar');
+      const ptext = document.getElementById('upload-progress-text');
+      pcontainer.style.display = 'block';
+      pbar.style.width = '0%';
+      ptext.textContent = `Uploading ${file.name}... (0%)`;
+
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/upload');
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const pct = Math.round((e.loaded / e.total) * 100);
+          pbar.style.width = pct + '%';
+          const loadedMB = (e.loaded / (1024 * 1024)).toFixed(1);
+          const totalMB = (e.total / (1024 * 1024)).toFixed(1);
+          ptext.textContent = `Uploading ${file.name}: ${pct}% (${loadedMB}MB / ${totalMB}MB)`;
+        }
+      };
+
+      xhr.onload = async () => {
+        if (xhr.status === 200) {
+          ptext.textContent = `✓ Uploaded ${file.name} successfully!`;
+          setTimeout(() => { pcontainer.style.display = 'none'; }, 2500);
+          await loadVideos(file.name);
+        } else {
+          ptext.textContent = `Upload failed: ${xhr.responseText}`;
+        }
+      };
+
+      xhr.onerror = () => {
+        ptext.textContent = 'Upload network error';
+      };
+
+      xhr.send(formData);
+    }
+
+    async function loadVideos(selectFilename = null) {
       try {
         const res = await fetch('/api/videos');
         const data = await res.json();
@@ -871,17 +1391,54 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         sel.innerHTML = '';
         if (data.videos.length === 0) {
           sel.innerHTML = '<option value="">No videos found in data/inbox</option>';
+          renderShorts([]);
+          renderCandidates([], []);
           return;
         }
         data.videos.forEach(v => {
           const opt = document.createElement('option');
           opt.value = v.filename;
           opt.textContent = `${v.filename} (${v.size_mb} MB)`;
+          if (selectFilename && v.filename === selectFilename) {
+            opt.selected = true;
+          }
           sel.appendChild(opt);
         });
-        onVideoSelected();
+        await onVideoSelected();
       } catch (err) {
         console.error('Failed to load videos:', err);
+      }
+    }
+
+    async function deleteSelectedVideo() {
+      const sel = document.getElementById('video-select').value;
+      if (!sel) return alert('No video selected');
+      if (!confirm(`Are you sure you want to permanently delete "${sel}" from inbox?`)) return;
+
+      try {
+        const res = await fetch(`/api/videos/${encodeURIComponent(sel)}`, { method: 'DELETE' });
+        if (res.ok) {
+          await loadVideos();
+        } else {
+          const err = await res.json();
+          alert(`Failed to delete video: ${err.detail || res.statusText}`);
+        }
+      } catch (err) {
+        alert(`Error: ${err}`);
+      }
+    }
+
+    async function clearAllVideos() {
+      if (!confirm('Are you sure you want to delete ALL videos from the inbox? This cannot be undone.')) return;
+      try {
+        const res = await fetch('/api/videos', { method: 'DELETE' });
+        if (res.ok) {
+          await loadVideos();
+        } else {
+          alert('Failed to clear inbox videos.');
+        }
+      } catch (err) {
+        alert(`Error: ${err}`);
       }
     }
 
@@ -890,27 +1447,39 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const res = await fetch('/api/settings');
         const data = await res.json();
         const groqPill = document.getElementById('groq-pill');
+        const statusEl = document.getElementById('groq-current-status');
         if (data.groq_configured) {
           groqPill.textContent = 'Groq Cloud Active';
           groqPill.className = 'badge badge-success';
+          if (statusEl) statusEl.textContent = `Configured (${data.groq_key_masked || 'Active'})`;
         } else {
           groqPill.textContent = 'Groq Key Unset';
-          groqPill.className = 'badge';
+          groqPill.className = 'badge badge-rating';
+          if (statusEl) statusEl.textContent = 'Not configured. Please enter a valid API key.';
         }
       } catch (err) {}
     }
 
     async function onVideoSelected() {
       const sel = document.getElementById('video-select').value;
-      if (!sel) return;
-      // Load completed job data for this video if exists
-      const res = await fetch('/api/jobs');
-      const data = await res.json();
-      const match = data.jobs.find(j => j.filename === sel);
-      if (match) {
-        currentJobId = match.source_id;
-        loadJobDetail(match.source_id);
+      if (!sel) {
+        renderShorts([]);
+        renderCandidates([], []);
+        return;
       }
+      try {
+        const res = await fetch('/api/jobs');
+        const data = await res.json();
+        const match = data.jobs.find(j => j.filename === sel);
+        if (match) {
+          currentJobId = match.source_id;
+          await loadJobDetail(match.source_id);
+        } else {
+          currentJobId = null;
+          renderShorts([]);
+          renderCandidates([], []);
+        }
+      } catch (err) {}
     }
 
     async function loadJobDetail(sourceId) {
@@ -922,12 +1491,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         renderCandidates(job.candidates || [], job.judgments || []);
 
         const statusBadge = document.getElementById('status-badge');
-        statusBadge.textContent = job.status;
+        const statusTitle = document.getElementById('status-title');
+        const pbar = document.getElementById('progress-bar');
+        const logBox = document.getElementById('log-box');
+
         if (job.status === 'COMPLETED') {
+          statusTitle.textContent = `${job.filename} (COMPLETED)`;
+          statusBadge.textContent = 'COMPLETED';
           statusBadge.className = 'badge badge-success';
-          document.getElementById('progress-bar').style.width = '100%';
-        } else if (job.status === 'RUNNING' || job.status === 'ANALYZING' || job.status === 'AI_JUDGING' || job.status === 'RENDERING') {
-          statusBadge.className = 'badge badge-active';
+          pbar.style.width = '100%';
+          logBox.textContent = `Job completed. ${job.shorts ? job.shorts.length : 0} vertical Shorts produced.`;
         }
       } catch (err) {}
     }
@@ -935,36 +1508,47 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     function renderShorts(shorts) {
       const grid = document.getElementById('shorts-grid');
       const summary = document.getElementById('shorts-summary');
+      const clearBtn = document.getElementById('btn-clear-shorts');
       summary.textContent = `${shorts.length} vertical Shorts produced`;
       grid.innerHTML = '';
 
       if (shorts.length === 0) {
         grid.innerHTML = '<div style="grid-column: 1/-1; padding: 32px; text-align: center; color: #9ca3af; border: 1px dashed #e5e7eb; border-radius: 6px;">No rendered Shorts yet. Click "Extract Real Shorts" to produce clips.</div>';
+        if (clearBtn) clearBtn.style.display = 'none';
         return;
       }
+
+      if (clearBtn) clearBtn.style.display = 'inline-flex';
 
       shorts.forEach(s => {
         const card = document.createElement('div');
         card.className = 'short-card';
+        const hookText = s.suggested_hook || s.title || 'Gaming Highlight';
+        const rating = s.editorial_rating ? `★ ${s.editorial_rating}/5` : '★ 4/5';
+        const encodedPath = encodeURIComponent(s.path || '');
+        const encodedHook = encodeURIComponent(hookText);
+
         card.innerHTML = `
           <div class="video-wrapper">
-            <video controls playsinline preload="metadata" poster="${s.preview_url || ''}">
+            <video controls playsinline preload="metadata">
               <source src="${s.url}" type="video/mp4">
             </video>
           </div>
           <div class="short-body">
             <div style="display: flex; justify-content: space-between; align-items: center;">
-              <span class="badge badge-rating">★ ${s.editorial_rating}/5</span>
-              <span class="badge">${s.event_category}</span>
+              <span class="badge badge-rating">${rating}</span>
+              <span class="badge">${s.event_category || 'highlight'}</span>
             </div>
-            <div class="short-hook">${s.suggested_hook || s.title}</div>
-            <div class="short-desc">${s.summary || ''}</div>
+            <div class="short-hook">${escapeHtml(hookText)}</div>
+            <div class="short-desc">${escapeHtml(s.summary || '')}</div>
             <div class="short-meta">
               <span>Time: ${s.start_seconds ? formatTime(s.start_seconds) : ''} - ${s.end_seconds ? formatTime(s.end_seconds) : ''}</span>
               <span>${s.size_mb} MB</span>
             </div>
             <div class="short-actions">
-              <a href="${s.url}" download="${s.filename}">Download Short</a>
+              <button class="secondary btn-xs" onclick="copyHook(decodeURIComponent('${encodedHook}'), this)" title="Copy Hook to clipboard">📋 Copy Hook</button>
+              <a href="${s.url}" download="${s.filename}" class="btn-xs" style="text-align: center; text-decoration: none;">⬇️ Download</a>
+              <button class="btn-xs btn-danger-subtle" onclick="deleteShort(decodeURIComponent('${encodedPath}'))" title="Delete this short">🗑️ Delete</button>
             </div>
           </div>
         `;
@@ -994,11 +1578,190 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <td><strong>${start} – ${end}</strong></td>
           <td><span class="badge">${j.event_category || c.rule || 'gaming'}</span></td>
           <td><strong>${rating}</strong></td>
-          <td style="max-width: 400px;">${j.summary || 'Awaiting evaluation'}</td>
+          <td style="max-width: 400px;">${escapeHtml(j.summary || 'Awaiting evaluation')}</td>
           <td>${isSelected ? '<span class="badge badge-success">Approved</span>' : '<span class="badge">Reviewed</span>'}</td>
         `;
         tbody.appendChild(tr);
       });
+    }
+
+    function copyHook(text, btnElement) {
+      navigator.clipboard.writeText(text).then(() => {
+        const original = btnElement.textContent;
+        btnElement.textContent = '✓ Copied!';
+        btnElement.style.color = '#059669';
+        btnElement.style.borderColor = '#059669';
+        setTimeout(() => {
+          btnElement.textContent = original;
+          btnElement.style.color = '';
+          btnElement.style.borderColor = '';
+        }, 2000);
+      }).catch(err => {
+        alert('Failed to copy hook: ' + err);
+      });
+    }
+
+    async function deleteShort(path) {
+      if (!path) return alert('No path specified.');
+      if (!confirm('Are you sure you want to permanently delete this generated short?')) return;
+      try {
+        const res = await fetch(`/api/shorts?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
+        if (res.ok) {
+          if (currentJobId) {
+            await loadJobDetail(currentJobId);
+          }
+        } else {
+          alert('Failed to delete short.');
+        }
+      } catch (err) {
+        alert(`Error: ${err}`);
+      }
+    }
+
+    async function clearCurrentShorts() {
+      if (!currentJobId) return alert('No active job loaded.');
+      if (!confirm('Are you sure you want to delete all generated shorts for this video?')) return;
+      try {
+        const res = await fetch(`/api/jobs/${encodeURIComponent(currentJobId)}`, { method: 'DELETE' });
+        if (res.ok) {
+          currentJobId = null;
+          renderShorts([]);
+          renderCandidates([], []);
+          dismissStatus();
+          await loadVideos();
+        } else {
+          alert('Failed to clear shorts.');
+        }
+      } catch (err) {
+        alert(`Error: ${err}`);
+      }
+    }
+
+    async function dismissStatus() {
+      try {
+        await fetch('/api/tasks/dismiss', { method: 'POST' });
+        document.getElementById('status-title').textContent = 'Ready';
+        document.getElementById('status-badge').textContent = 'IDLE';
+        document.getElementById('status-badge').className = 'badge';
+        document.getElementById('progress-bar').style.width = '0%';
+        document.getElementById('log-box').textContent = 'Status cleared. Ready for next pipeline run.';
+      } catch (err) {}
+    }
+
+    async function deleteCurrentJob() {
+      if (!currentJobId) return alert('No job loaded to delete.');
+      if (!confirm('Delete this job output, completed shorts, and reset database history?')) return;
+      try {
+        const res = await fetch(`/api/jobs/${encodeURIComponent(currentJobId)}`, { method: 'DELETE' });
+        if (res.ok) {
+          currentJobId = null;
+          dismissStatus();
+          renderShorts([]);
+          renderCandidates([], []);
+          refreshDashboard();
+        } else {
+          alert('Failed to delete job.');
+        }
+      } catch (err) {
+        alert(`Error: ${err}`);
+      }
+    }
+
+    async function stopActivePipeline() {
+      if (!confirm('Stop the currently running pipeline?')) return;
+      try {
+        await fetch('/api/tasks/stop', { method: 'POST' });
+        document.getElementById('status-title').textContent = 'Pipeline Stopped';
+        document.getElementById('status-badge').textContent = 'STOPPED';
+        document.getElementById('status-badge').className = 'badge badge-rating';
+      } catch (err) {
+        alert(`Error stopping pipeline: ${err}`);
+      }
+    }
+
+    function openCleanupModal() {
+      document.getElementById('cleanup-modal').style.display = 'flex';
+    }
+
+    function closeCleanupModal() {
+      document.getElementById('cleanup-modal').style.display = 'none';
+    }
+
+    async function executeCleanup(resetAll = false) {
+      let body = {};
+      if (resetAll) {
+        if (!confirm('WARNING: TOTAL WIPE. This will permanently delete ALL inbox videos, processing temp files, generated shorts, and reset the SQLite database. Are you sure?')) {
+          return;
+        }
+        body = {
+          clear_processing: true,
+          clear_completed: true,
+          clear_inbox: true,
+          reset_db: true
+        };
+      } else {
+        body = {
+          clear_processing: document.getElementById('clean-processing').checked,
+          clear_completed: document.getElementById('clean-completed').checked,
+          clear_inbox: document.getElementById('clean-inbox').checked,
+          reset_db: document.getElementById('clean-db').checked
+        };
+        if (!body.clear_processing && !body.clear_completed && !body.clear_inbox && !body.reset_db) {
+          alert('Please select at least one item to clean.');
+          return;
+        }
+      }
+
+      try {
+        const res = await fetch('/api/cleanup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        if (res.ok) {
+          const data = await res.json();
+          alert(`Cleanup completed: ${data.cleaned.join(', ') || 'Done'}`);
+          closeCleanupModal();
+          currentJobId = null;
+          dismissStatus();
+          renderShorts([]);
+          renderCandidates([], []);
+          await loadVideos();
+        } else {
+          alert('Cleanup failed.');
+        }
+      } catch (err) {
+        alert(`Error during cleanup: ${err}`);
+      }
+    }
+
+    function openSettingsModal() {
+      document.getElementById('settings-modal').style.display = 'flex';
+      loadSettings();
+    }
+
+    function closeSettingsModal() {
+      document.getElementById('settings-modal').style.display = 'none';
+    }
+
+    async function saveGroqKey() {
+      const key = document.getElementById('groq-key-input').value.trim();
+      if (!key || key.length < 10) {
+        alert('Please enter a valid Groq API key (starts with gsk_...)');
+        return;
+      }
+      try {
+        const res = await fetch(`/api/settings/groq-key?key=${encodeURIComponent(key)}`, { method: 'POST' });
+        if (res.ok) {
+          alert('Groq API Key saved successfully!');
+          closeSettingsModal();
+          await loadSettings();
+        } else {
+          alert('Failed to save Groq API key.');
+        }
+      } catch (err) {
+        alert(`Error: ${err}`);
+      }
     }
 
     function formatTime(secs) {
@@ -1006,6 +1769,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const m = Math.floor(secs / 60);
       const s = Math.floor(secs % 60);
       return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    function escapeJsString(str) {
+      if (!str) return '';
+      return JSON.stringify(str).slice(1, -1);
     }
 
     async function startProcessing() {
@@ -1016,13 +1791,28 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
       const provider = document.getElementById('provider-select').value;
       const creator = document.getElementById('creator-name').value;
+      const layout = document.getElementById('layout-select').value;
+      const encoder = document.getElementById('encoder-select').value;
       const minShorts = parseInt(document.getElementById('min-shorts').value, 10) || 1;
-      const maxShorts = parseInt(document.getElementById('max-shorts').value, 10) || 3;
+      let maxShorts = parseInt(document.getElementById('max-shorts').value, 10) || 3;
+      if (maxShorts < minShorts) {
+        maxShorts = minShorts;
+        document.getElementById('max-shorts').value = maxShorts;
+      }
       const minScore = parseInt(document.getElementById('min-score').value, 10) || 3;
       const maxCandidates = Math.max(10, minShorts * 3);
 
+      const btn = document.getElementById('btn-extract');
+      const btnStop = document.getElementById('btn-stop');
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Processing Pipeline Active...';
+      }
+      if (btnStop) btnStop.style.display = 'inline-flex';
+
       document.getElementById('status-title').textContent = 'Starting pipeline...';
       document.getElementById('status-badge').textContent = 'QUEUED';
+      document.getElementById('status-badge').className = 'badge badge-active';
       document.getElementById('progress-bar').style.width = '15%';
 
       try {
@@ -1036,7 +1826,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             min_shorts: minShorts,
             max_shorts: maxShorts,
             max_candidates: maxCandidates,
-            min_score: minScore
+            min_score: minScore,
+            layout: layout,
+            encoder: encoder
           })
         });
         const data = await res.json();
@@ -1045,6 +1837,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         pollStatus();
       } catch (err) {
         alert('Failed to launch pipeline: ' + err);
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = 'Extract Real Shorts';
+        }
+        if (btnStop) btnStop.style.display = 'none';
       }
     }
 
@@ -1053,6 +1850,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (!url) return alert('Enter a valid YouTube URL');
       document.getElementById('status-title').textContent = 'Downloading video from YouTube...';
       document.getElementById('status-badge').textContent = 'DOWNLOADING';
+      document.getElementById('status-badge').className = 'badge badge-active';
       try {
         await fetch('/api/download', {
           method: 'POST',
@@ -1074,23 +1872,76 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const pbar = document.getElementById('progress-bar');
         const statusBadge = document.getElementById('status-badge');
         const statusTitle = document.getElementById('status-title');
+        const video = document.getElementById('video-select').value;
+        const btnExtract = document.getElementById('btn-extract');
+        const btnStop = document.getElementById('btn-stop');
 
+        // Check if there is a running task
         const activeKeys = Object.keys(tasks);
-        if (activeKeys.length > 0) {
-          const latestKey = activeKeys[activeKeys.length - 1];
-          const t = tasks[latestKey];
-          statusTitle.textContent = `${latestKey} (${t.status})`;
-          statusBadge.textContent = t.status;
-          if (t.logs && t.logs.length > 0) {
-            logBox.textContent = t.logs.slice(-15).join('\\n');
+        let runningTask = null;
+        let failedTask = null;
+
+        for (const k of activeKeys) {
+          const t = tasks[k];
+          if (t.status === 'RUNNING' || t.status === 'DOWNLOADING') {
+            runningTask = { key: k, ...t };
+            break;
+          }
+          if (t.status === 'FAILED' || t.status === 'ERROR') {
+            failedTask = { key: k, ...t };
+          }
+        }
+
+        if (runningTask) {
+          statusTitle.textContent = `${runningTask.key} (${runningTask.status})`;
+          statusBadge.textContent = runningTask.status;
+          statusBadge.className = 'badge badge-active';
+          pbar.style.width = '65%';
+          if (btnExtract) {
+            btnExtract.disabled = true;
+            btnExtract.textContent = 'Processing Pipeline Active...';
+          }
+          if (btnStop) btnStop.style.display = 'inline-flex';
+          if (runningTask.logs && runningTask.logs.length > 0) {
+            logBox.textContent = runningTask.logs.slice(-20).join('\\n');
             logBox.scrollTop = logBox.scrollHeight;
           }
-          if (t.status === 'RUNNING') {
-            pbar.style.width = '65%';
-          } else if (t.status === 'COMPLETED') {
-            pbar.style.width = '100%';
+          return;
+        }
+
+        // Pipeline is not actively running
+        if (btnStop) btnStop.style.display = 'none';
+        if (btnExtract) {
+          btnExtract.disabled = false;
+          btnExtract.textContent = 'Extract Real Shorts';
+        }
+
+        // Check DB status for selected video: database completed truth takes priority
+        const jobsRes = await fetch('/api/jobs');
+        if (jobsRes.ok) {
+          const jobsData = await jobsRes.json();
+          const dbJob = (jobsData.jobs || []).find(j => j.filename === video);
+          if (dbJob && dbJob.status === 'COMPLETED') {
+            statusTitle.textContent = `${video} (COMPLETED)`;
+            statusBadge.textContent = 'COMPLETED';
             statusBadge.className = 'badge badge-success';
-            onVideoSelected();
+            pbar.style.width = '100%';
+            if (currentJobId !== dbJob.source_id) {
+              currentJobId = dbJob.source_id;
+              await loadJobDetail(dbJob.source_id);
+            }
+            return;
+          }
+        }
+
+        if (failedTask) {
+          statusTitle.textContent = `${failedTask.key} (${failedTask.status})`;
+          statusBadge.textContent = failedTask.status;
+          statusBadge.className = 'badge badge-danger';
+          pbar.style.width = '100%';
+          if (failedTask.logs && failedTask.logs.length > 0) {
+            logBox.textContent = failedTask.logs.slice(-20).join('\\n');
+            logBox.scrollTop = logBox.scrollHeight;
           }
         }
       } catch (err) {}

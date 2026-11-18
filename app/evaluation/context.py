@@ -176,10 +176,12 @@ def extract_speech_context(
     if not transcript_files:
         return SpeechContext(has_speech=False, provenance="none")
 
-    # Ingest word & segment entries that overlap candidate window
+    # Ingest word & segment entries that overlap candidate window (buffered by 8s for complete sentence setup)
     selected_words: list[TranscriptWordContext] = []
     selected_segments: list[TranscriptSegmentContext] = []
     detected_lang: str | None = None
+    query_start = max(0.0, candidate_start - 8.0)
+    query_end = candidate_end + 8.0
 
     for t_file in transcript_files:
         try:
@@ -190,12 +192,12 @@ def extract_speech_context(
             for seg in data.get("segments", []):
                 s_start = float(seg.get("start", 0))
                 s_end = float(seg.get("end", 0))
-                if s_end > candidate_start and s_start < candidate_end:
+                if s_end > query_start and s_start < query_end:
                     words_in_seg = []
                     for w in seg.get("words", []):
                         w_start = float(w.get("start", 0))
                         w_end = float(w.get("end", 0))
-                        if candidate_start <= w_start <= candidate_end:
+                        if query_start <= w_start <= query_end:
                             w_ctx = TranscriptWordContext(
                                 word=str(w.get("word", "")).strip(),
                                 start=w_start,

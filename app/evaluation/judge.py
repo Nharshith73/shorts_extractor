@@ -6,6 +6,7 @@ import csv
 import json
 import logging
 from pathlib import Path
+import time
 from typing import Any, Sequence
 
 from .context import FrameSamplerConfig, build_candidate_context
@@ -131,6 +132,11 @@ def judge_candidates(
         )
 
         LOGGER.info("Evaluating candidate %s with provider %s...", w_id, provider.model_name)
+        if records and getattr(provider, "config", None):
+            inter_delay = getattr(provider.config, "inter_request_delay_seconds", 0.0)
+            if inter_delay > 0:
+                time.sleep(inter_delay)
+
         # Call provider
         if hasattr(provider, "judge_candidate_record"):
             record = provider.judge_candidate_record(ctx, timeout_seconds=timeout_seconds)
