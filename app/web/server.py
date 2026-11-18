@@ -847,7 +847,13 @@ class WatcherStartRequest(BaseModel):
 def api_watcher_start(req: WatcherStartRequest):
     global ACTIVE_WATCHER_SESSION
     if ACTIVE_WATCHER_SESSION and ACTIVE_WATCHER_SESSION.is_running:
-        return {"status": "ALREADY_RUNNING", "channel": ACTIVE_WATCHER_SESSION.channel, "platform": ACTIVE_WATCHER_SESSION.platform}
+        LOGGER.info("Stopping previous watcher session (%s on %s) to start new channel (%s)",
+                    ACTIVE_WATCHER_SESSION.channel, ACTIVE_WATCHER_SESSION.platform, req.channel)
+        try:
+            ACTIVE_WATCHER_SESSION.stop()
+        except Exception:
+            pass
+        ACTIVE_WATCHER_SESSION = None
 
     from app.live.watcher import LiveWatcherSession
     ACTIVE_WATCHER_SESSION = LiveWatcherSession(
@@ -1644,9 +1650,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div class="form-group">
             <label for="layout-select">Vertical 9:16 Layout</label>
             <select id="layout-select">
-              <option value="blurred_background" selected>Blurred Background (Reels Standard)</option>
+              <option value="center_crop" selected>Full Screen 9:16 (Center Crop - Best for Mobile & Retention)</option>
               <option value="stacked">Stacked 9:16 (Top/Bottom Split)</option>
-              <option value="center_crop">Center Crop 9:16</option>
+              <option value="blurred_background">Blurred Background (Cinematic Letterbox)</option>
             </select>
           </div>
           <div class="form-group">
@@ -1731,8 +1737,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div class="form-group">
             <label for="live-layout">Vertical 9:16 Layout</label>
             <select id="live-layout">
-              <option value="blurred_background" selected>Blurred Background (Reels Standard)</option>
-              <option value="center_crop">Center Crop 9:16</option>
+              <option value="center_crop" selected>Full Screen 9:16 (Center Crop - Best for Mobile & Retention)</option>
+              <option value="blurred_background">Blurred Background (Cinematic Letterbox)</option>
             </select>
           </div>
           <div class="form-group">
@@ -2720,9 +2726,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const platName = (data.platform || 'TWITCH').toUpperCase();
           if (btnStart) btnStart.style.display = 'none';
           if (btnStop) btnStop.style.display = 'inline-flex';
+
+          const rec = data.recorder;
+          const recError = (rec && rec.error) || data.error;
+          const isAlive = rec ? rec.alive : true;
+
           if (streamBadge) {
-            streamBadge.textContent = `Stream: LIVE [${platName}] (${data.channel})`;
-            streamBadge.className = 'badge badge-success';
+            if (!isAlive || recError) {
+              streamBadge.textContent = `⚠️ Offline / No Stream (${data.channel})`;
+              streamBadge.className = 'badge badge-danger';
+              streamBadge.title = recError || 'Streamer is offline or channel not found';
+            } else {
+              const mb = rec && rec.file_size_mb ? ` (${rec.file_size_mb} MB)` : '';
+              streamBadge.textContent = `Stream: LIVE [${platName}] (${data.channel})${mb}`;
+              streamBadge.className = 'badge badge-success';
+            }
           }
           if (ircBadge) {
             const isConn = data.chat_connected ?? data.irc_connected;

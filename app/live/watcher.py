@@ -271,16 +271,16 @@ class LiveWatcherSession:
             full_text = " ".join(s.text for s in segments).strip()
             raw_words, _ = usable_words(transcript, render_cfg, info.duration)
 
-            # 4. Snap boundaries to avoid abrupt endings
+            # 4. Snap boundaries to avoid abrupt endings (Fast Hook: start 4-5s before spike)
             snapped_start = 0.0
             snapped_end = info.duration
             if segments:
                 try:
                     s_s, s_e = snap_to_speech_boundaries(
-                        raw_start=max(0.0, spike.lead_in_seconds - 15.0),
-                        raw_end=info.duration,
+                        raw_start=max(0.0, spike.lead_in_seconds - 5.0),
+                        raw_end=min(info.duration, spike.lead_in_seconds + 16.0),
                         segments=list(segments),
-                        max_duration=info.duration,
+                        max_duration=min(28.0, info.duration),
                         reaction_padding=1.8,
                     )
                     snapped_start = s_s
@@ -328,6 +328,7 @@ class LiveWatcherSession:
                 captions_enabled=True,
                 crf=20,
                 creator_credit=creator_tag,
+                hook_header=hook_text,
             )
 
             final_short_path = self.shorts_dir / f"{clip_id}.mp4"

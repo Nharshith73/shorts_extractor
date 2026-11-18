@@ -74,11 +74,17 @@ ScaledBorderAndShadow: yes
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Caption,{family},{config.font_size},{base},{highlight},&H00000000,{back},-1,0,0,0,100,100,0,0,{border},{config.outline},{config.shadow},2,{config.margin_horizontal},{config.margin_horizontal},{config.margin_bottom},1
 Style: Credit,{family},36,&H00FFFFFF,&H00000000,&H00000000,&H90000000,-1,0,0,0,100,100,0,0,1,2,1,8,40,40,90,1
+Style: Hook,{family},52,&H0000FFFF,&H00000000,&H00000000,&H00000000,-1,0,0,0,100,100,0,0,1,5,3,8,40,40,150,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     lines = [header]
+    if config.hook_header and config.hook_header.strip():
+        clean_hook = re.sub(r"[^\w\s.,!?\'\"-]", "", config.hook_header.strip()).strip().upper()
+        if clean_hook:
+            hook_end = ass_time(duration)
+            lines.append(f"Dialogue: 2,0:00:00.00,{hook_end},Hook,,0,0,0,,{{\\b1}}{clean_hook}\n")
     if config.creator_credit and config.creator_credit.strip():
         tag = config.creator_credit.strip()
         if not tag.startswith("@"):

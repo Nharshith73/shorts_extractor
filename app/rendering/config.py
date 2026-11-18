@@ -43,6 +43,7 @@ class RenderConfig:
     crf: int = 18
     preset: str = "medium"
     creator_credit: str | None = None
+    hook_header: str | None = None
 
     def validate(self) -> None:
         if not self.whisper_model or not self.compute_type or not self.language:
