@@ -615,9 +615,18 @@ def api_process_video(req: ProcessRequest, bg: BackgroundTasks):
 class DownloadRequest(BaseModel):
     url: str
     output_name: str | None = None
+    browser: str | None = None
+    use_cookies: bool = True
 
 
-def run_download_worker(url: str, output_name: str | None):
+def find_cookies_file() -> Path | None:
+    for candidate in [DATA_DIR / "cookies.txt", ROOT_DIR / "cookies.txt"]:
+        if candidate.is_file() and candidate.stat().st_size > 0:
+            return candidate
+    return None
+
+
+def run_download_worker(url: str, output_name: str | None, browser: str | None = None, use_cookies: bool = True):
     INBOX_DIR.mkdir(parents=True, exist_ok=True)
     out_tmpl = str(INBOX_DIR / (output_name or "%(id)s.%(ext)s"))
     cmd = [
@@ -625,11 +634,27 @@ def run_download_worker(url: str, output_name: str | None):
         "-m",
         "yt_dlp",
         "-f",
-        "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]",
+        "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "-o",
         out_tmpl,
-        url,
+        "--no-check-certificates",
     ]
+
+    # 1. Enable Node.js JS runtime if node is on PATH (solves YouTube challenges)
+    if shutil.which("node"):
+        cmd.extend(["--js-runtimes", "node"])
+
+    # 2. Check for cookies file or browser cookies (solves age-restriction & auth errors)
+    cookies_path = find_cookies_file() if use_cookies else None
+    if cookies_path:
+        cmd.extend(["--cookies", str(cookies_path)])
+        LOGGER.info("yt-dlp using cookies file: %s", cookies_path)
+    elif browser and browser.lower() in ("chrome", "edge", "firefox", "brave", "opera"):
+        cmd.extend(["--cookies-from-browser", browser.lower()])
+        LOGGER.info("yt-dlp using cookies from browser: %s", browser)
+
+    cmd.append(url)
+
     task_id = f"download_{int(time.time())}"
     ACTIVE_TASKS[task_id] = {
         "status": "DOWNLOADING",
@@ -665,11 +690,33 @@ def api_download_video(req: DownloadRequest):
 
     thread = threading.Thread(
         target=run_download_worker,
-        args=(req.url, req.output_name),
+        args=(req.url, req.output_name, req.browser, req.use_cookies),
         daemon=True,
     )
     thread.start()
     return {"status": "DOWNLOADING_STARTED", "url": req.url}
+
+
+@app.post("/api/upload-cookies")
+async def api_upload_cookies(file: UploadFile = File(...)):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+    target = DATA_DIR / "cookies.txt"
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(target, "wb") as f:
+        while chunk := await file.read(1024 * 64):
+            f.write(chunk)
+    return {"status": "UPLOADED", "filename": "cookies.txt", "size_bytes": target.stat().st_size}
+
+
+@app.get("/api/cookies-status")
+def api_cookies_status():
+    f = find_cookies_file()
+    return {
+        "has_cookies_file": bool(f),
+        "cookies_path": str(f) if f else None,
+        "has_node_runtime": bool(shutil.which("node")),
+    }
 
 
 @app.get("/api/settings")
@@ -746,6 +793,45 @@ def api_watcher_status():
     if not ACTIVE_WATCHER_SESSION:
         return {"is_running": False}
     return ACTIVE_WATCHER_SESSION.get_status()
+
+
+class WatcherTestClipRequest(BaseModel):
+    duration: float = 30.0
+    layout: str = "blurred_background"
+    encoder: str = "auto"
+
+
+@app.post("/api/watcher/test-clip")
+def api_watcher_test_clip(req: WatcherTestClipRequest = WatcherTestClipRequest()):
+    global ACTIVE_WATCHER_SESSION
+    from app.live.watcher import create_test_short
+
+    # 1. If active watcher session is running, trigger manual clip from live stream
+    if ACTIVE_WATCHER_SESSION and ACTIVE_WATCHER_SESSION.is_running:
+        try:
+            res = ACTIVE_WATCHER_SESSION.trigger_manual_clip(clip_duration=req.duration)
+            return {
+                "status": "TRIGGERED",
+                "mode": "live_stream",
+                "message": f"Triggered {req.duration:.0f}s clip from live {ACTIVE_WATCHER_SESSION.platform} stream",
+                "detail": res,
+            }
+        except RuntimeError as exc:
+            LOGGER.warning("Manual live clip fallback: %s", exc)
+
+    # 2. Standalone 30s test short rendering
+    meta = create_test_short(
+        output_dir=COMPLETED_DIR,
+        layout=req.layout,
+        encoder=req.encoder,
+        duration_seconds=req.duration,
+    )
+    return {
+        "status": "COMPLETED",
+        "mode": "standalone_test",
+        "message": "Successfully rendered 30s test reel into shorts directory",
+        "short": meta,
+    }
 
 
 # Minimalist, White Background Dashboard HTML
@@ -1209,6 +1295,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <input type="text" id="yt-url" placeholder="https://www.youtube.com/watch?v=...">
             <button class="secondary" onclick="downloadYoutube()" style="white-space: nowrap;">Fetch</button>
           </div>
+          <div style="display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap;">
+            <span style="font-size: 11px; color: #6b7280; font-weight: 500;">Auth / Cookies:</span>
+            <select id="yt-cookies-mode" style="padding: 2px 6px; font-size: 11px; width: auto;">
+              <option value="auto" selected>Auto (cookies.txt if present)</option>
+              <option value="chrome">Browser: Chrome</option>
+              <option value="edge">Browser: Edge</option>
+              <option value="firefox">Browser: Firefox</option>
+              <option value="brave">Browser: Brave</option>
+              <option value="none">None (Public Videos)</option>
+            </select>
+            <button class="btn-xs secondary" type="button" onclick="document.getElementById('cookies-file-input').click()" title="Upload cookies.txt for age-restricted/member videos">📁 Upload cookies.txt</button>
+            <input type="file" id="cookies-file-input" accept=".txt" style="display: none;" onchange="uploadCookiesFile(this)">
+            <span id="cookies-status-badge" class="badge" style="font-size: 10px;">Cookies: Checking...</span>
+          </div>
+          <span class="field-hint" style="margin-top: 4px;">Node.js runtime active (solves challenge scripts). For age-restricted videos, upload <code>cookies.txt</code> or select your browser.</span>
         </div>
 
         <div class="form-group" style="margin-bottom: 0;">
@@ -1337,6 +1438,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div style="display: flex; gap: 8px; margin-top: 10px;">
           <button style="flex: 2;" id="btn-start-watcher" class="primary" onclick="startWatcher()">Start Watching Stream</button>
           <button class="secondary btn-danger-subtle" id="btn-stop-watcher" style="flex: 1; display: none;" onclick="stopWatcher()">Stop Watcher</button>
+          <button style="flex: 1.2;" id="btn-test-clip" class="secondary" onclick="triggerTestClip()" title="Instantly cut a 30-second test reel">⚡ Test 30s Reel</button>
         </div>
       </div>
 
@@ -1512,6 +1614,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       await loadVideos();
       await loadSettings();
       await loadAllShorts();
+      await checkCookiesStatus();
       await pollStatus();
       await pollWatcherStatus();
       setInterval(pollStatus, 3000);
@@ -1613,6 +1716,48 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         pollWatcherStatus();
       } catch (err) {
         alert('Error stopping watcher: ' + err);
+      }
+    }
+
+    async function triggerTestClip() {
+      const btn = document.getElementById('btn-test-clip');
+      const originalText = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '⏳ Cutting 30s Reel...';
+
+      const layout = document.getElementById('live-layout').value;
+      const encoder = document.getElementById('live-encoder').value;
+
+      try {
+        const res = await fetch('/api/watcher/test-clip', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            duration: 30.0,
+            layout: layout,
+            encoder: encoder
+          })
+        });
+        const data = await res.json();
+        btn.innerHTML = '✓ Reel Cut!';
+        setTimeout(() => {
+          btn.innerHTML = originalText;
+          btn.disabled = false;
+        }, 2000);
+
+        // Refresh shorts gallery immediately
+        await loadAllShorts();
+
+        // If returned short has a path, play it automatically
+        if (data.short && data.short.path) {
+          playShort(data.short.path, data.short.title, data.short.suggested_hook, data.short.description);
+        } else if (data.mode === 'live_stream') {
+          alert('Live 30s reel extraction triggered! It will appear in Completed Shorts shortly.');
+        }
+      } catch (err) {
+        alert('Error cutting test reel: ' + err);
+        btn.innerHTML = originalText;
+        btn.disabled = false;
       }
     }
 
@@ -2213,8 +2358,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     async function downloadYoutube() {
-      const url = document.getElementById('yt-url').value;
+      const url = document.getElementById('yt-url').value.trim();
       if (!url) return alert('Enter a valid YouTube URL');
+      const cookiesMode = document.getElementById('yt-cookies-mode').value;
+      const useCookies = cookiesMode !== 'none';
+      const browser = (cookiesMode !== 'auto' && cookiesMode !== 'none') ? cookiesMode : null;
+
       document.getElementById('status-title').textContent = 'Downloading video from YouTube...';
       document.getElementById('status-badge').textContent = 'DOWNLOADING';
       document.getElementById('status-badge').className = 'badge badge-active';
@@ -2222,11 +2371,54 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         await fetch('/api/download', {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({url: url})
+          body: JSON.stringify({
+            url: url,
+            browser: browser,
+            use_cookies: useCookies
+          })
         });
         pollStatus();
       } catch (err) {
         alert('Download request failed: ' + err);
+      }
+    }
+
+    async function checkCookiesStatus() {
+      try {
+        const res = await fetch('/api/cookies-status');
+        if (!res.ok) return;
+        const data = await res.json();
+        const badge = document.getElementById('cookies-status-badge');
+        if (!badge) return;
+        if (data.has_cookies_file) {
+          badge.textContent = 'cookies.txt: Active';
+          badge.className = 'badge badge-success';
+        } else {
+          badge.textContent = 'cookies.txt: None';
+          badge.className = 'badge';
+        }
+      } catch (e) {}
+    }
+
+    async function uploadCookiesFile(input) {
+      if (!input.files || input.files.length === 0) return;
+      const file = input.files[0];
+      const formData = new FormData();
+      formData.append('file', file);
+      try {
+        const res = await fetch('/api/upload-cookies', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+        if (data.status === 'UPLOADED') {
+          alert('cookies.txt uploaded successfully! yt-dlp will now use your cookies for age-restricted & authenticated videos.');
+          checkCookiesStatus();
+        } else {
+          alert('Failed to upload cookies: ' + JSON.stringify(data));
+        }
+      } catch (err) {
+        alert('Error uploading cookies: ' + err);
       }
     }
 

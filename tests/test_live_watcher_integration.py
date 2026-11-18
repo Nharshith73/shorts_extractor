@@ -137,3 +137,33 @@ def test_chat_spike_with_simulated_stream(tmp_path: Path) -> None:
     assert spike is not None
     assert spike.message_count == 15
     assert len(session._spike_detector.detected_spikes) == 1
+
+
+def test_api_watcher_test_clip_standalone(client: TestClient) -> None:
+    # Trigger standalone test reel cut (5s duration for fast test)
+    res = client.post("/api/watcher/test-clip", json={
+        "duration": 5.0,
+        "layout": "blurred_background",
+    })
+    assert res.status_code == 200
+    data = res.json()
+    assert data["status"] == "COMPLETED"
+    assert data["mode"] == "standalone_test"
+    assert "short" in data
+    assert Path(data["short"]["path"]).is_file()
+
+    # Verify short appears in /api/shorts list
+    res_shorts = client.get("/api/shorts")
+    assert res_shorts.status_code == 200
+    shorts_list = res_shorts.json()["shorts"]
+    assert len(shorts_list) >= 1
+    assert any("test_clip" in s["filename"] for s in shorts_list)
+
+
+def test_api_cookies_status(client: TestClient) -> None:
+    res = client.get("/api/cookies-status")
+    assert res.status_code == 200
+    data = res.json()
+    assert "has_cookies_file" in data
+    assert "has_node_runtime" in data
+    assert data["has_node_runtime"] is True
