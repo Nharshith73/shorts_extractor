@@ -386,6 +386,54 @@ class LiveWatcherSession:
             LOGGER.debug("Live AI judgment fallback: %s", exc)
         return None
 
+    def trigger_manual_clip(self, clip_duration: float = 30.0) -> dict[str, Any]:
+        """Trigger an immediate 30-second reel cut from the live stream recording."""
+        if not self.is_running:
+            raise RuntimeError("Live watcher is not actively running.")
+
+        curr_time = 0.0
+        if self._recorder and self._recorder.output_file.is_file():
+            curr_time = self._recorder.get_duration()
+        elif self.simulated_video and self.simulated_video.is_file():
+            curr_time = probe_media(self.simulated_video).duration
+        else:
+            curr_time = round(time.time() - (self._started_at or time.time()), 2)
+
+        if curr_time < 2.0:
+            raise RuntimeError(f"Stream recording buffer is only {curr_time:.1f}s. Please wait a few seconds before testing.")
+
+        start_time = max(0.0, curr_time - clip_duration)
+        end_time = curr_time
+
+        spike = ChatSpikeEvent(
+            timestamp=curr_time,
+            message_count=99,
+            baseline_median=10.0,
+            spike_ratio=9.9,
+            lead_in_seconds=curr_time - start_time,
+            lookahead_seconds=0.0,
+            context_start=start_time,
+            context_end=end_time,
+        )
+
+        # Trigger processing in background thread
+        thread = threading.Thread(
+            target=self._process_spike_moment,
+            args=(spike,),
+            name=f"manual-clip-{int(curr_time)}",
+            daemon=True,
+        )
+        thread.start()
+
+        return {
+            "status": "TRIGGERED",
+            "start_seconds": round(start_time, 2),
+            "end_seconds": round(end_time, 2),
+            "duration": round(end_time - start_time, 2),
+            "channel": self.channel,
+            "platform": self.platform,
+        }
+
     def _extract_subclip_ffmpeg(self, source: Path, start: float, end: float, out_path: Path) -> None:
         cmd = [
             "ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", str(source),
@@ -402,6 +450,80 @@ class LiveWatcherSession:
             return torch.cuda.is_available()
         except Exception:
             return False
+
+
+def create_test_short(
+    output_dir: Path,
+    layout: str = "blurred_background",
+    encoder: str = "auto",
+    duration_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Generate and render a 30s test vertical Short into completed output."""
+    output_dir = Path(output_dir).resolve()
+    session_id = f"test_{int(time.time())}"
+    run_dir = output_dir / "test_live" / "runs" / session_id
+    shorts_dir = run_dir / "shorts"
+    meta_dir = run_dir / "metadata"
+    work_dir = run_dir / "work"
+    for d in (shorts_dir, meta_dir, work_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    # 1. Fast synthesis of 30s test footage with audio
+    source_mp4 = work_dir / "test_source.mp4"
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", f"testsrc2=size=1280x720:rate=30:duration={duration_seconds:.1f}",
+        "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate=44100:duration={duration_seconds:.1f}",
+        "-c:v", "libx264", "-preset", "ultrafast",
+        "-c:a", "aac", "-t", f"{duration_seconds:.1f}",
+        str(source_mp4),
+    ]
+    import subprocess
+    subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+
+    info = probe_media(source_mp4)
+    selector = EncoderSelector(requested=encoder)
+    render_cfg = RenderConfig(layout=layout, captions_enabled=True, crf=20)
+
+    # 2. Add sample viral subtitles
+    words = [
+        Word(start=1.0, end=4.5, text="LIVE STREAMER MOMENT!", probability=1.0),
+        Word(start=5.0, end=9.5, text="Chat is going crazy!", probability=1.0),
+        Word(start=10.0, end=15.0, text="30-Second Reel Cut", probability=1.0),
+        Word(start=15.5, end=20.0, text="Spike Detection Active", probability=1.0),
+        Word(start=20.5, end=28.0, text="Ready for YouTube Shorts", probability=1.0),
+    ]
+
+    out_mp4 = shorts_dir / f"test_clip_{int(duration_seconds)}s.mp4"
+    render_original(
+        source=source_mp4,
+        output=out_mp4,
+        start=0.0,
+        duration=duration_seconds,
+        info=info,
+        words=words,
+        config=render_cfg,
+        work=work_dir,
+        selector=selector,
+    )
+
+    meta = {
+        "clip_id": out_mp4.stem,
+        "title": "⚡ Live Watcher 30s Test Reel",
+        "suggested_hook": "WHAT A MOMENT! 😱",
+        "description": "30-second test reel cut directly from Live Watcher pipeline with 9:16 layout and subtitles.",
+        "start_seconds": 0.0,
+        "end_seconds": duration_seconds,
+        "duration": duration_seconds,
+        "spike_ratio": 5.0,
+        "message_count": 50,
+        "editorial_rating": 5,
+        "channel": "test_live",
+        "path": str(out_mp4),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    (meta_dir / f"{out_mp4.stem}.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return meta
 
 
 def main() -> int:

@@ -146,6 +146,37 @@ class StreamlinkRecorder:
             "error": self._error_message,
         }
 
+    def get_duration(self) -> float:
+        """Probe recorded video duration in seconds using ffprobe."""
+        if not self.output_file.is_file() or self.output_file.stat().st_size == 0:
+            return 0.0
+        try:
+            probe = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration:stream=duration",
+                    "-of",
+                    "csv=p=0",
+                    str(self.output_file),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+            )
+            for val in probe.stdout.splitlines():
+                try:
+                    dur = float(val.strip(",").strip())
+                    if dur > 0.1:
+                        return dur
+                except ValueError:
+                    continue
+        except Exception:
+            pass
+        return self.elapsed_seconds
+
     def extract_clip(
         self,
         start_seconds: float,
