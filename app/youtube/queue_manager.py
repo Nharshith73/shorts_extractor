@@ -344,12 +344,15 @@ class YouTubeQueueManager:
                     self._save_locked(queue)
             except Exception as exc:
                 LOGGER.error("Failed uploading item %s: %s", item_id, exc)
+                err_msg = str(exc)
+                if "uploadLimitExceeded" in err_msg:
+                    err_msg = "⚠️ Daily YouTube upload limit reached (~5-10 videos/day for new channels). Your quota resets in 24h. You can immediately increase this limit by verifying your channel in YouTube Studio (Settings > Channel > Feature Eligibility > Advanced Features)."
                 with self._lock:
                     queue = self._load_locked()
                     for q in queue:
                         if q["id"] == item_id:
                             q["status"] = "failed"
-                            q["error"] = str(exc)
+                            q["error"] = err_msg
                             break
                     self._save_locked(queue)
 

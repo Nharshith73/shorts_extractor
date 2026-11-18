@@ -1103,7 +1103,10 @@ def api_youtube_upload_now(req: UploadNowRequest):
         return res
     except Exception as exc:
         LOGGER.error("Direct YouTube upload failed: %s", exc)
-        raise HTTPException(status_code=400, detail=str(exc))
+        err_msg = str(exc)
+        if "uploadLimitExceeded" in err_msg:
+            err_msg = "⚠️ Daily YouTube upload limit reached (~5-10 videos/day for new channels). Your quota resets in 24h. You can immediately increase this limit by verifying your channel in YouTube Studio (Settings > Channel > Feature Eligibility > Advanced Features)."
+        raise HTTPException(status_code=400, detail=err_msg)
 
 
 class QueueEnhanceRequest(BaseModel):
