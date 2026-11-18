@@ -33,4 +33,6 @@ data/cookies.txt
 *client_secret*.json
 *youtube_token*.json
 data/youtube_queue.json
+data/.oauth_flow_states.json
+.oauth_flow_states.json
 data/test_rec/

@@ -96,7 +96,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         for index, word in enumerate(group):
             w_start = max(cursor, word.start)
             if index + 1 < len(group):
-                w_end = max(w_start + 0.12, group[index + 1].start)
+                # Ensure each karaoke word stays highlighted long enough to be legible (>= 0.22s)
+                # while snapping smoothly to next word's arrival.
+                w_end = max(w_start + 0.22, group[index + 1].start)
             else:
                 # Hold completed phrase until next phrase begins (or up to 0.75s sustain)
                 if g_idx + 1 < len(groups):

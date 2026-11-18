@@ -212,10 +212,12 @@ def api_cleanup(req: CleanupRequest):
 
 @app.get("/api/shorts")
 def api_list_shorts():
-    """List all rendered 9:16 Shorts across completed VOD jobs and live Twitch watcher runs."""
+    """List all rendered 9:16 Shorts across completed VOD jobs and live Twitch/Kick watcher runs."""
     shorts = []
     if not COMPLETED_DIR.is_dir():
         return {"shorts": []}
+
+    from app.evaluation.viral_metadata import ViralMetadataGenerator
 
     for mp4 in COMPLETED_DIR.rglob("shorts/*.mp4"):
         if not mp4.is_file():
@@ -223,12 +225,41 @@ def api_list_shorts():
         try:
             st = mp4.stat()
             meta_json = mp4.parent.parent / "metadata" / f"{mp4.stem}.json"
+            alt_json = mp4.with_suffix(".json")
             meta: dict[str, Any] = {}
             if meta_json.is_file():
                 try:
                     meta = json.loads(meta_json.read_text(encoding="utf-8"))
                 except Exception:
                     pass
+            elif alt_json.is_file():
+                try:
+                    meta = json.loads(alt_json.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
+            raw_title = meta.get("title", "")
+            channel_name = meta.get("channel") or meta.get("creator") or ""
+            # If title is missing or default stem or not attention grabbing, enhance it
+            if not raw_title or raw_title == mp4.stem or raw_title.startswith(("spike_", "clip_", "rank_", "test_clip_")) or ("#Shorts" not in raw_title and "#shorts" not in raw_title):
+                v = ViralMetadataGenerator.generate(
+                    dialogue=meta.get("caption_text") or meta.get("summary") or "",
+                    creator=channel_name,
+                    platform=meta.get("platform") or "youtube",
+                    category=meta.get("event_category", "funny"),
+                    spike_ratio=float(meta.get("spike_ratio") or 0.0),
+                    raw_summary=meta.get("description") or "",
+                    use_ai=False,
+                )
+                title = v.title
+                suggested_hook = v.suggested_hook
+                tags = v.tags
+                desc = v.description
+            else:
+                title = raw_title
+                suggested_hook = meta.get("suggested_hook", "WHAT JUST HAPPENED?! 💀")
+                tags = meta.get("tags") or ["Shorts", "viral", "gaming", "highlights"]
+                desc = meta.get("description", "")
 
             shorts.append({
                 "filename": mp4.name,
@@ -236,14 +267,15 @@ def api_list_shorts():
                 "url": f"/media/file?path={urllib.parse.quote(str(mp4))}",
                 "size_mb": round(st.st_size / (1024 * 1024), 2),
                 "mtime": st.st_mtime,
-                "title": meta.get("title", mp4.stem),
-                "suggested_hook": meta.get("suggested_hook"),
-                "summary": meta.get("description", ""),
+                "title": title,
+                "suggested_hook": suggested_hook,
+                "summary": desc,
+                "tags": tags,
                 "event_category": meta.get("event_category", "highlight"),
                 "editorial_rating": meta.get("editorial_rating", 4),
                 "start_seconds": meta.get("start_seconds"),
                 "end_seconds": meta.get("end_seconds"),
-                "channel": meta.get("channel"),
+                "channel": channel_name,
             })
         except Exception:
             pass
@@ -680,8 +712,48 @@ def run_download_worker(url: str, output_name: str | None, browser: str | None =
         if proc.returncode == 0:
             ACTIVE_TASKS[task_id]["status"] = "COMPLETED"
         else:
-            ACTIVE_TASKS[task_id]["status"] = "FAILED"
             log_str = " ".join(ACTIVE_TASKS[task_id]["logs"])
+            if "Could not copy Chrome cookie database" in log_str:
+                cf = find_cookies_file()
+                if cf:
+                    ACTIVE_TASKS[task_id]["logs"].append("⚠️ Chrome database locked by open browser. Retrying automatically with data/cookies.txt...")
+                    fallback_cmd = [a for a in cmd if a not in ("--cookies-from-browser", (browser or "").lower())]
+                    fallback_cmd.extend(["--cookies", str(cf)])
+                    retry_proc = subprocess.Popen(
+                        fallback_cmd,
+                        cwd=str(ROOT_DIR),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                    )
+                    for line in retry_proc.stdout:
+                        clean = line.strip()
+                        if clean:
+                            ACTIVE_TASKS[task_id]["logs"].append(clean)
+                    retry_proc.wait()
+                    if retry_proc.returncode == 0:
+                        ACTIVE_TASKS[task_id]["status"] = "COMPLETED"
+                        return
+                else:
+                    ACTIVE_TASKS[task_id]["logs"].append("⚠️ Chrome database locked. Retrying download directly without browser cookies...")
+                    fallback_cmd = [a for a in cmd if a not in ("--cookies-from-browser", (browser or "").lower())]
+                    retry_proc = subprocess.Popen(
+                        fallback_cmd,
+                        cwd=str(ROOT_DIR),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                    )
+                    for line in retry_proc.stdout:
+                        clean = line.strip()
+                        if clean:
+                            ACTIVE_TASKS[task_id]["logs"].append(clean)
+                    retry_proc.wait()
+                    if retry_proc.returncode == 0:
+                        ACTIVE_TASKS[task_id]["status"] = "COMPLETED"
+                        return
+
+            ACTIVE_TASKS[task_id]["status"] = "FAILED"
             if "Could not copy Chrome cookie database" in log_str:
                 ACTIVE_TASKS[task_id]["logs"].append(
                     "💡 NOTE: Google Chrome is currently open on Windows, which locks its cookie database. "
@@ -1017,6 +1089,46 @@ def api_youtube_upload_now(req: UploadNowRequest):
     except Exception as exc:
         LOGGER.error("Direct YouTube upload failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+class QueueEnhanceRequest(BaseModel):
+    item_id: str
+    creator: str = ""
+
+
+class MetadataGenerateRequest(BaseModel):
+    dialogue: str = ""
+    creator: str = ""
+    platform: str = "youtube"
+    category: str = "funny"
+    spike_ratio: float = 0.0
+    summary: str = ""
+
+
+@app.post("/api/youtube/queue/enhance")
+def api_youtube_queue_enhance(req: QueueEnhanceRequest):
+    """Auto-enhance or re-roll viral title, description, and tags for a queued item."""
+    from app.youtube.queue_manager import GLOBAL_YOUTUBE_QUEUE
+    enhanced = GLOBAL_YOUTUBE_QUEUE.enhance_item(req.item_id, req.creator)
+    if not enhanced:
+        raise HTTPException(status_code=404, detail="Item not found in queue")
+    return {"status": "ENHANCED", "item": enhanced}
+
+
+@app.post("/api/metadata/generate")
+def api_metadata_generate(req: MetadataGenerateRequest):
+    """Generate attention-grabbing viral package on-demand."""
+    from app.evaluation.viral_metadata import ViralMetadataGenerator
+    viral = ViralMetadataGenerator.generate(
+        dialogue=req.dialogue,
+        creator=req.creator,
+        platform=req.platform,
+        category=req.category,
+        spike_ratio=req.spike_ratio,
+        raw_summary=req.summary,
+        use_ai=True,
+    )
+    return viral.to_dict()
 
 
 # Minimalist, White Background Dashboard HTML
@@ -1751,6 +1863,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <div style="font-size: 12px; color: #6b7280;" id="yt-queue-summary">0 items in queue</div>
             </div>
             <div style="display: flex; gap: 6px;">
+              <button class="btn-xs secondary" onclick="enhanceAllQueueItems()" title="Generate viral titles & tags for all pending queue items">✨ Enhance All</button>
               <button class="btn-xs btn-danger-subtle" onclick="clearCompletedQueue()">Clear Done</button>
               <button class="btn-xs secondary" onclick="fetchYouTubeQueue()">Refresh</button>
             </div>
@@ -2150,8 +2263,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       try {
         const payload = [{
           video_path: s.path,
-          title: s.suggested_hook ? `${s.suggested_hook} | ${s.title || ''}` : (s.title || s.filename),
+          title: s.title || (s.suggested_hook ? `${s.suggested_hook} #Shorts` : s.filename),
           description: s.summary || `Exciting highlight Short from ${s.channel || 'stream'}! #Shorts`,
+          tags: s.tags || [],
+          suggested_hook: s.suggested_hook || '',
+          channel: s.channel || '',
           privacy: 'public',
         }];
         const res = await fetch('/api/youtube/queue/add', {
@@ -2172,8 +2288,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const selected = ytAvailableShorts.filter(s => ytSelectedPaths.has(s.path));
       const payload = selected.map(s => ({
         video_path: s.path,
-        title: s.suggested_hook ? `${s.suggested_hook} | ${s.title || ''}` : (s.title || s.filename),
+        title: s.title || (s.suggested_hook ? `${s.suggested_hook} #Shorts` : s.filename),
         description: s.summary || `Exciting highlight Short from ${s.channel || 'stream'}! #Shorts`,
+        tags: s.tags || [],
+        suggested_hook: s.suggested_hook || '',
+        channel: s.channel || '',
         privacy: 'public',
       }));
 
@@ -2258,6 +2377,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       container.innerHTML = queue.map(item => {
         const titleVal = escapeHtml(item.title || '');
         const privacy = item.privacy || 'public';
+        const tags = Array.isArray(item.tags) ? item.tags : [];
+        const hookText = item.suggested_hook ? escapeHtml(item.suggested_hook) : '';
 
         let statusBadge = '';
         if (item.status === 'pending') {
@@ -2297,8 +2418,34 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               </div>` : ''}
 
             <div style="margin-bottom: 8px;">
-              <label style="font-size: 11px; margin-bottom: 2px;">Short Title</label>
-              <input type="text" value="${titleVal}" onchange="updateQueueItemMetadata('${item.id}', 'title', this.value)" style="padding: 5px 8px; font-size: 12px;" ${item.status !== 'pending' ? 'readonly' : ''}>
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px;">
+                <label style="font-size: 11px; font-weight: 600; color: #374151;">Viral Short Title</label>
+                ${item.status === 'pending' ? `
+                  <button class="btn-xs secondary" onclick="enhanceQueueItem('${item.id}', this)" title="Re-roll with viral attention-grabbing formulas" style="font-size: 10px; padding: 1px 7px;">
+                    ✨ Auto-Enhance
+                  </button>` : ''}
+              </div>
+              <input type="text" value="${titleVal}" onchange="updateQueueItemMetadata('${item.id}', 'title', this.value)" style="padding: 5px 8px; font-size: 12px; font-weight: 500;" ${item.status !== 'pending' ? 'readonly' : ''}>
+            </div>
+
+            <div style="margin-bottom: 8px;">
+              <details style="font-size: 11px;">
+                <summary style="cursor: pointer; color: #4b5563; user-select: none; font-weight: 500;">
+                  📝 Description & Tags (${tags.length} tags)
+                </summary>
+                <div style="margin-top: 6px;">
+                  <label style="font-size: 10px; color: #6b7280; margin-bottom: 2px; display: block;">Structured Video Description:</label>
+                  <textarea rows="4" onchange="updateQueueItemMetadata('${item.id}', 'description', this.value)" style="width: 100%; font-size: 11px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 4px; font-family: inherit; resize: vertical;" ${item.status !== 'pending' ? 'readonly' : ''}>${escapeHtml(item.description || '')}</textarea>
+                  
+                  <div style="margin-top: 6px;">
+                    <label style="font-size: 10px; color: #6b7280; margin-bottom: 2px; display: block;">Targeted Search Tags:</label>
+                    <div style="display: flex; flex-wrap: wrap; gap: 4px; max-height: 48px; overflow-y: auto;">
+                      ${tags.slice(0, 12).map(t => `<span style="display: inline-block; background: #f3f4f6; color: #374151; font-size: 10px; padding: 1px 6px; border-radius: 3px; border: 1px solid #e5e7eb;">#${escapeHtml(t)}</span>`).join('')}
+                      ${tags.length > 12 ? `<span style="font-size: 10px; color: #9ca3af; align-self: center;">+${tags.length - 12} more</span>` : ''}
+                    </div>
+                  </div>
+                </div>
+              </details>
             </div>
 
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
@@ -2320,6 +2467,53 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </div>
         `;
       }).join('');
+    }
+
+    async function enhanceQueueItem(itemId, btnElem) {
+      if (btnElem) {
+        btnElem.disabled = true;
+        btnElem.textContent = '⏳ Enhancing...';
+      }
+      try {
+        const res = await fetch('/api/youtube/queue/enhance', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ item_id: itemId })
+        });
+        if (res.ok) {
+          await fetchYouTubeQueue();
+        } else {
+          const err = await res.json();
+          alert('Could not enhance item: ' + (err.detail || 'Error'));
+        }
+      } catch (e) {
+        alert('Error enhancing item: ' + e);
+      } finally {
+        if (btnElem) {
+          btnElem.disabled = false;
+          btnElem.textContent = '✨ Auto-Enhance';
+        }
+      }
+    }
+
+    async function enhanceAllQueueItems() {
+      const queueData = await (await fetch('/api/youtube/queue')).json();
+      const pending = (queueData.queue || []).filter(q => q.status === 'pending');
+      if (pending.length === 0) {
+        alert('No pending queue items to enhance.');
+        return;
+      }
+      for (const item of pending) {
+        try {
+          await fetch('/api/youtube/queue/enhance', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ item_id: item.id })
+          });
+        } catch (e) {}
+      }
+      await fetchYouTubeQueue();
+    }
     }
 
     async function updateQueueItemMetadata(itemId, key, value) {

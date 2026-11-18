@@ -302,21 +302,24 @@ class LiveWatcherSession:
                 if w.end > snapped_start and w.start < snapped_end
             ]
 
-            # 5. AI Editorial Filter / Hook Generation (optional)
-            hook_text = "WHAT JUST HAPPENED?!"
+            # 5. Viral Metadata Packaging (High-CTR Title, On-Screen Hook, Structured Description, SEO Tags)
+            from app.evaluation.viral_metadata import ViralMetadataGenerator
+            summary_raw = f"{self.platform.capitalize()} chat surged {spike.spike_ratio:.1f}x baseline ({spike.message_count} messages in 10s)"
+            viral = ViralMetadataGenerator.generate(
+                dialogue=full_text,
+                creator=self.channel,
+                platform=self.platform,
+                category="funny",
+                spike_ratio=spike.spike_ratio,
+                raw_summary=summary_raw,
+                use_ai=self.ai_mode in ("groq", "qwen"),
+            )
+            hook_text = viral.suggested_hook
+            title_text = viral.title
+            full_description = viral.description
+            tags_list = viral.tags
+            cta_text = viral.call_to_action
             editorial_rating = 4
-            summary = f"{self.platform.capitalize()} chat surged {spike.spike_ratio:.1f}x baseline ({spike.message_count} messages in 10s)"
-
-            if self.ai_mode in ("groq", "qwen"):
-                ai_meta = self._run_ai_judgment(
-                    summary_text=full_text,
-                    spike=spike,
-                    duration=final_duration,
-                )
-                if ai_meta:
-                    hook_text = ai_meta.get("hook_suggestion", hook_text)
-                    editorial_rating = ai_meta.get("editorial_rating", editorial_rating)
-                    summary = ai_meta.get("summary", summary)
 
             # 6. Render final 9:16 vertical Short
             creator_tag = f"@{self.channel.lstrip('@')}" if self.channel else None
@@ -343,9 +346,11 @@ class LiveWatcherSession:
             # 7. Write metadata JSON
             meta = {
                 "clip_id": clip_id,
-                "title": f"#{self.channel.upper()} {summary[:50]}",
+                "title": title_text,
                 "suggested_hook": hook_text,
-                "description": summary,
+                "description": full_description,
+                "tags": tags_list,
+                "call_to_action": cta_text,
                 "start_seconds": round(spike.context_start + snapped_start, 2),
                 "end_seconds": round(spike.context_start + snapped_end, 2),
                 "duration": round(final_duration, 2),
@@ -353,6 +358,7 @@ class LiveWatcherSession:
                 "message_count": spike.message_count,
                 "editorial_rating": editorial_rating,
                 "channel": self.channel,
+                "platform": self.platform,
                 "path": str(final_short_path),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
@@ -553,18 +559,32 @@ def create_test_short(
         selector=selector,
     )
 
+    from app.evaluation.viral_metadata import ViralMetadataGenerator
+    viral_test = ViralMetadataGenerator.generate(
+        dialogue=" ".join(w.text for w in words),
+        creator=creator_credit,
+        platform="youtube",
+        category="clutch",
+        spike_ratio=5.0,
+        raw_summary="Unreal high-energy 30-second live stream test reel with subtitles.",
+        use_ai=False,
+    )
+
     meta = {
         "clip_id": out_mp4.stem,
-        "title": "⚡ Live Watcher 30s Test Reel",
-        "suggested_hook": "WHAT A MOMENT! 😱",
-        "description": "30-second test reel cut directly from Live Watcher pipeline with 9:16 layout and subtitles.",
+        "title": viral_test.title,
+        "suggested_hook": viral_test.suggested_hook,
+        "description": viral_test.description,
+        "tags": viral_test.tags,
+        "call_to_action": viral_test.call_to_action,
         "start_seconds": 0.0,
         "end_seconds": duration_seconds,
         "duration": duration_seconds,
         "spike_ratio": 5.0,
         "message_count": 50,
         "editorial_rating": 5,
-        "channel": "test_live",
+        "channel": creator_credit.lstrip("@"),
+        "platform": "live",
         "path": str(out_mp4),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

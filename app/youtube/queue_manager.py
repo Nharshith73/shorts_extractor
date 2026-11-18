@@ -58,8 +58,41 @@ class YouTubeQueueManager:
                     continue
 
                 item_id = f"ytq_{int(time.time() * 1000)}_{len(queue) + 1}"
-                title = raw.get("title") or raw.get("hook") or Path(vpath).stem
-                desc = raw.get("description") or f"Highlight clip from stream: {title}"
+                v_obj = Path(vpath)
+
+                # Look for existing metadata JSON
+                meta = {}
+                for cand in [v_obj.parent.parent / "metadata" / f"{v_obj.stem}.json", v_obj.with_suffix(".json")]:
+                    if cand.is_file():
+                        try:
+                            meta = json.loads(cand.read_text(encoding="utf-8"))
+                            break
+                        except Exception:
+                            pass
+
+                title = raw.get("title") or meta.get("title") or meta.get("suggested_hook")
+                desc = raw.get("description") or meta.get("description")
+                tags = raw.get("tags") or meta.get("tags")
+                hook = raw.get("suggested_hook") or meta.get("suggested_hook")
+                creator = raw.get("channel") or meta.get("channel") or meta.get("creator") or ""
+
+                # If missing or bland, viralize with attention-grabbing system
+                if not title or title.startswith(("spike_", "clip_", "rank_", "test_clip_")) or ("#Shorts" not in title and "#shorts" not in title):
+                    from app.evaluation.viral_metadata import ViralMetadataGenerator
+                    viral = ViralMetadataGenerator.generate(
+                        dialogue=meta.get("caption_text") or desc or "",
+                        creator=creator,
+                        platform=meta.get("platform") or "youtube",
+                        category=meta.get("event_category") or "funny",
+                        spike_ratio=float(meta.get("spike_ratio") or 0.0),
+                        raw_summary=desc or title or "",
+                        use_ai=True,
+                    )
+                    title = viral.title
+                    desc = viral.description
+                    tags = viral.tags
+                    hook = viral.suggested_hook
+
                 privacy = raw.get("privacy", "public").lower()
                 if privacy not in ("public", "unlisted", "private"):
                     privacy = "public"
@@ -69,8 +102,9 @@ class YouTubeQueueManager:
                     "video_path": vpath,
                     "file_name": Path(vpath).name,
                     "title": title,
+                    "suggested_hook": hook,
                     "description": desc,
-                    "tags": raw.get("tags") or ["Shorts", "gaming", "stream", "highlights"],
+                    "tags": tags or ["Shorts", "gaming", "stream", "highlights", "viral"],
                     "privacy": privacy,
                     "status": "pending",  # pending, uploading, completed, failed
                     "progress": 0,
@@ -88,6 +122,51 @@ class YouTubeQueueManager:
 
         LOGGER.info("Added %d items to YouTube upload queue.", len(added))
         return added
+
+    def enhance_item(self, item_id: str, creator: str = "") -> dict[str, Any] | None:
+        """Auto-enhance title, description, and tags with viral attention-grabbing system."""
+        from app.evaluation.viral_metadata import ViralMetadataGenerator
+        with self._lock:
+            queue = self._load_locked()
+            target = None
+            for q in queue:
+                if q["id"] == item_id:
+                    target = q
+                    break
+            if not target:
+                return None
+
+            vpath = Path(target["video_path"])
+            meta = {}
+            for cand in [vpath.parent.parent / "metadata" / f"{vpath.stem}.json", vpath.with_suffix(".json")]:
+                if cand.is_file():
+                    try:
+                        meta = json.loads(cand.read_text(encoding="utf-8"))
+                        break
+                    except Exception:
+                        pass
+
+            c_name = creator or meta.get("channel") or meta.get("creator") or target.get("channel") or ""
+            dialogue = meta.get("caption_text") or meta.get("summary") or target.get("description") or ""
+            category = meta.get("event_category") or "funny"
+            spike = float(meta.get("spike_ratio") or 0.0)
+
+            viral = ViralMetadataGenerator.generate(
+                dialogue=dialogue,
+                creator=c_name,
+                platform=meta.get("platform") or "youtube",
+                category=category,
+                spike_ratio=spike,
+                raw_summary=meta.get("description") or target.get("description") or "",
+                use_ai=True,
+            )
+
+            target["title"] = viral.title
+            target["description"] = viral.description
+            target["tags"] = viral.tags
+            target["suggested_hook"] = viral.suggested_hook
+            self._save_locked(queue)
+            return target
 
     def remove_item(self, item_id: str) -> bool:
         """Remove item from queue by ID."""
