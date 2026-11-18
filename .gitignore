@@ -28,3 +28,9 @@ data/failed/
 scratch/
 data/.*.lock
 *.lock
+cookies.txt
+data/cookies.txt
+*client_secret*.json
+*youtube_token*.json
+data/youtube_queue.json
+data/test_rec/

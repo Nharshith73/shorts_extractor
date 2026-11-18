@@ -27,7 +27,7 @@ import urllib.parse
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.evaluation.providers.groq import resolve_groq_api_key
@@ -844,6 +844,181 @@ def api_watcher_test_clip(req: WatcherTestClipRequest = WatcherTestClipRequest()
     }
 
 
+# ---------------------------------------------------------------------------
+# YouTube Integration & Upload Queue Endpoints
+# ---------------------------------------------------------------------------
+
+class QueueAddRequest(BaseModel):
+    items: list[dict[str, Any]]
+
+
+class QueueUpdateRequest(BaseModel):
+    item_id: str
+    updates: dict[str, Any]
+
+
+class QueueRemoveRequest(BaseModel):
+    item_id: str
+
+
+class UploadNowRequest(BaseModel):
+    video_path: str
+    title: str
+    description: str = ""
+    privacy: str = "public"
+    tags: list[str] | None = None
+
+
+@app.get("/api/youtube/status")
+def api_youtube_status():
+    """Return connected YouTube channel profile and statistics."""
+    from app.youtube.client import get_channel_info
+    return get_channel_info()
+
+
+@app.get("/api/youtube/auth-url")
+def api_youtube_auth_url(request: Request):
+    """Generate Google OAuth authorization URL for YouTube upload permissions."""
+    from app.youtube.client import get_auth_url
+    redirect_uri = f"{request.base_url}api/youtube/oauth2callback".rstrip("/")
+    if "127.0.0.1" in redirect_uri:
+        redirect_uri = redirect_uri.replace("127.0.0.1", "localhost")
+    try:
+        auth_url, state = get_auth_url(redirect_uri)
+        return {"auth_url": auth_url, "state": state, "redirect_uri": redirect_uri}
+    except Exception as exc:
+        LOGGER.error("Failed to generate YouTube auth URL: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/youtube/oauth2callback")
+def api_youtube_oauth_callback(request: Request, code: str = "", error: str = ""):
+    """OAuth redirect handler from Google consent screen."""
+    if error:
+        return HTMLResponse(f"""<!DOCTYPE html><html><body style="font-family:sans-serif;padding:30px;">
+        <script>
+            if (window.opener) {{
+                window.opener.postMessage({{ type: 'YOUTUBE_AUTH_ERROR', error: '{error}' }}, '*');
+                window.close();
+            }} else {{
+                window.location.href = '/?tab=youtube&auth_error={urllib.parse.quote(error)}';
+            }}
+        </script>
+        <h3>Authentication Failed</h3>
+        <p>Google returned error: {error}. You may close this window.</p>
+        </body></html>""")
+
+    from app.youtube.client import exchange_code
+    redirect_uri = f"{request.base_url}api/youtube/oauth2callback".rstrip("/")
+    if "127.0.0.1" in redirect_uri:
+        redirect_uri = redirect_uri.replace("127.0.0.1", "localhost")
+
+    try:
+        info = exchange_code(code, redirect_uri)
+        return HTMLResponse(f"""<!DOCTYPE html><html><body style="font-family:sans-serif;padding:30px;">
+        <script>
+            if (window.opener) {{
+                window.opener.postMessage({{ type: 'YOUTUBE_AUTH_SUCCESS' }}, '*');
+                window.close();
+            }} else {{
+                window.location.href = '/?tab=youtube&auth=success';
+            }}
+        </script>
+        <h3>YouTube Connected!</h3>
+        <p>Your channel has been linked successfully. Returning to dashboard...</p>
+        </body></html>""")
+    except Exception as exc:
+        LOGGER.error("YouTube OAuth token exchange failed: %s", exc)
+        return HTMLResponse(f"""<!DOCTYPE html><html><body style="font-family:sans-serif;padding:30px;">
+        <script>
+            if (window.opener) {{
+                window.opener.postMessage({{ type: 'YOUTUBE_AUTH_ERROR', error: '{exc}' }}, '*');
+                window.close();
+            }} else {{
+                window.location.href = '/?tab=youtube&auth_error={urllib.parse.quote(str(exc))}';
+            }}
+        </script>
+        <h3>Authentication Error</h3>
+        <p>{exc}. You may close this window.</p>
+        </body></html>""")
+
+
+@app.post("/api/youtube/disconnect")
+def api_youtube_disconnect():
+    """Disconnect active YouTube account by unlinking credentials."""
+    from app.youtube.client import disconnect
+    success = disconnect()
+    return {"status": "DISCONNECTED", "success": success}
+
+
+@app.get("/api/youtube/queue")
+def api_youtube_queue():
+    """Get current YouTube upload queue and upload worker status."""
+    from app.youtube.queue_manager import GLOBAL_YOUTUBE_QUEUE
+    return {
+        "queue": GLOBAL_YOUTUBE_QUEUE.get_queue(),
+        "is_uploading": GLOBAL_YOUTUBE_QUEUE.is_uploading,
+    }
+
+
+@app.post("/api/youtube/queue/add")
+def api_youtube_queue_add(req: QueueAddRequest):
+    """Add selected videos to YouTube upload queue."""
+    from app.youtube.queue_manager import GLOBAL_YOUTUBE_QUEUE
+    added = GLOBAL_YOUTUBE_QUEUE.add_to_queue(req.items)
+    return {"added_count": len(added), "added": added}
+
+
+@app.post("/api/youtube/queue/remove")
+def api_youtube_queue_remove(req: QueueRemoveRequest):
+    """Remove a video from YouTube upload queue."""
+    from app.youtube.queue_manager import GLOBAL_YOUTUBE_QUEUE
+    success = GLOBAL_YOUTUBE_QUEUE.remove_item(req.item_id)
+    return {"success": success}
+
+
+@app.post("/api/youtube/queue/update")
+def api_youtube_queue_update(req: QueueUpdateRequest):
+    """Update title, description, tags, or privacy for a queued item."""
+    from app.youtube.queue_manager import GLOBAL_YOUTUBE_QUEUE
+    updated = GLOBAL_YOUTUBE_QUEUE.update_item(req.item_id, req.updates)
+    return {"updated": updated}
+
+
+@app.post("/api/youtube/queue/clear")
+def api_youtube_queue_clear():
+    """Clear completed and failed items from upload queue."""
+    from app.youtube.queue_manager import GLOBAL_YOUTUBE_QUEUE
+    cleared = GLOBAL_YOUTUBE_QUEUE.clear_completed()
+    return {"cleared_count": cleared}
+
+
+@app.post("/api/youtube/queue/start")
+def api_youtube_queue_start():
+    """Start background sequential upload worker for pending items."""
+    from app.youtube.queue_manager import GLOBAL_YOUTUBE_QUEUE
+    res = GLOBAL_YOUTUBE_QUEUE.start_upload_worker()
+    return res
+
+
+@app.post("/api/youtube/upload-now")
+def api_youtube_upload_now(req: UploadNowRequest):
+    """Directly upload a single Short immediately."""
+    from app.youtube.uploader import upload_short
+    try:
+        res = upload_short(
+            video_path=req.video_path,
+            title=req.title,
+            description=req.description,
+            tags=req.tags,
+            privacy=req.privacy,
+        )
+        return res
+    except Exception as exc:
+        LOGGER.error("Direct YouTube upload failed: %s", exc)
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 # Minimalist, White Background Dashboard HTML
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -1255,12 +1430,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </header>
 
     <!-- Dashboard Mode Switcher Tabs -->
-    <div style="display: flex; gap: 8px; margin-bottom: 22px; border-bottom: 1px solid #e5e7eb; padding-bottom: 12px;">
+    <div style="display: flex; gap: 8px; margin-bottom: 22px; border-bottom: 1px solid #e5e7eb; padding-bottom: 12px; flex-wrap: wrap;">
       <button id="tab-btn-vod" class="primary" onclick="setDashboardTab('vod')" style="padding: 7px 16px; font-size: 13px;">
         📁 Video Files & VOD Mode
       </button>
       <button id="tab-btn-live" class="secondary" onclick="setDashboardTab('live')" style="padding: 7px 16px; font-size: 13px;">
         🔴 Live Watcher (Twitch & Kick Spike Detection)
+      </button>
+      <button id="tab-btn-youtube" class="secondary" onclick="setDashboardTab('youtube')" style="padding: 7px 16px; font-size: 13px; display: inline-flex; align-items: center; gap: 6px;">
+        <span>📺 YouTube & Upload Queue</span>
+        <span id="nav-queue-badge" class="badge badge-active" style="display:none; font-size:10px; padding: 1px 6px;">0</span>
       </button>
     </div>
 
@@ -1494,6 +1673,104 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- YouTube Publisher & Upload Queue Panel -->
+    <div id="panel-youtube" style="display: none; margin-bottom: 26px;">
+      <!-- Channel Connection Banner Card -->
+      <div class="card" style="margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
+        <div id="yt-channel-disconnected" style="display: flex; align-items: center; gap: 14px;">
+          <div style="width: 44px; height: 44px; border-radius: 50%; background: #fee2e2; display: flex; align-items: center; justify-content: center; font-size: 20px;">
+            📺
+          </div>
+          <div>
+            <div style="font-weight: 700; font-size: 15px; color: #111827;">YouTube Account Not Connected</div>
+            <div style="font-size: 12px; color: #6b7280;" id="yt-disconnected-subtitle">
+              Connect your YouTube channel using Google OAuth to upload 9:16 Shorts with automated #Shorts tags.
+            </div>
+          </div>
+        </div>
+        <div id="yt-channel-connected" style="display: none; align-items: center; gap: 14px;">
+          <img id="yt-channel-avatar" src="" alt="Avatar" style="width: 44px; height: 44px; border-radius: 50%; border: 1px solid #e5e7eb; object-fit: cover;">
+          <div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span id="yt-channel-title" style="font-weight: 700; font-size: 15px; color: #111827;">Channel Name</span>
+              <span class="badge badge-success">✓ YouTube Connected</span>
+            </div>
+            <div style="font-size: 12px; color: #6b7280; display: flex; gap: 12px; margin-top: 3px;">
+              <span id="yt-channel-subs">0 subscribers</span>
+              <span>•</span>
+              <span id="yt-channel-videos">0 videos</span>
+              <span>•</span>
+              <a id="yt-channel-link" href="#" target="_blank" style="color: #2563eb; text-decoration: none; font-weight: 500;">View Channel ↗</a>
+            </div>
+          </div>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <button id="btn-yt-connect" class="primary" onclick="connectYouTube()" style="background: #ef4444; border-color: #ef4444; color: #ffffff;">
+            🔴 Connect YouTube Channel
+          </button>
+          <button id="btn-yt-disconnect" class="secondary btn-danger-subtle" onclick="disconnectYouTube()" style="display: none;">
+            Disconnect Channel
+          </button>
+        </div>
+      </div>
+
+      <!-- Main Queue & Selection Grid -->
+      <div class="grid-2" style="grid-template-columns: 1.15fr 0.85fr; align-items: start; gap: 20px;">
+        <!-- Left: Rendered Shorts Selector Library -->
+        <div class="card" style="padding: 18px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <div>
+              <div class="card-title" style="margin-bottom: 2px;">1. Select Shorts For Upload Queue</div>
+              <div style="font-size: 12px; color: #6b7280;" id="yt-library-subtitle">Choose produced Shorts to publish</div>
+            </div>
+            <div style="display: flex; gap: 6px;">
+              <button class="btn-xs secondary" onclick="selectAllShortsForQueue(true)">Select All</button>
+              <button class="btn-xs secondary" onclick="selectAllShortsForQueue(false)">Deselect</button>
+              <button class="btn-xs secondary" onclick="loadYouTubeLibrary()">Refresh</button>
+            </div>
+          </div>
+
+          <div style="margin-bottom: 14px;">
+            <button id="btn-add-selected-to-queue" class="primary" onclick="addSelectedShortsToQueue()" style="width: 100%; justify-content: center;" disabled>
+              ➕ Add Selected to Upload Queue (0)
+            </button>
+          </div>
+
+          <div id="yt-shorts-selection-list" style="max-height: 560px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px;">
+            <div style="text-align: center; padding: 40px 10px; color: #9ca3af; font-size: 12px;">
+              Loading produced shorts...
+            </div>
+          </div>
+        </div>
+
+        <!-- Right: Upload Queue & Sequential Publisher -->
+        <div class="card" style="padding: 18px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <div>
+              <div class="card-title" style="margin-bottom: 2px;">2. YouTube Upload Queue</div>
+              <div style="font-size: 12px; color: #6b7280;" id="yt-queue-summary">0 items in queue</div>
+            </div>
+            <div style="display: flex; gap: 6px;">
+              <button class="btn-xs btn-danger-subtle" onclick="clearCompletedQueue()">Clear Done</button>
+              <button class="btn-xs secondary" onclick="fetchYouTubeQueue()">Refresh</button>
+            </div>
+          </div>
+
+          <div style="margin-bottom: 14px;">
+            <button id="btn-start-queue-upload" class="primary" onclick="startQueueUpload()" style="width: 100%; justify-content: center; background: #059669; border-color: #059669; color: #fff;">
+              🚀 Upload All Pending Now
+            </button>
+          </div>
+
+          <div id="yt-queue-list" style="max-height: 560px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding-right: 4px;">
+            <div style="text-align: center; padding: 40px 10px; color: #9ca3af; font-size: 12px;">
+              Your upload queue is empty.<br>Check videos on the left and click "Add Selected to Upload Queue".
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Live Status / Progress Panel -->
     <div class="status-panel" id="status-panel">
       <div class="status-header">
@@ -1513,7 +1790,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
 
     <!-- Completed Shorts Gallery -->
-    <div style="margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center;">
+    <div id="gallery-header" style="margin-bottom: 14px; display: flex; justify-content: space-between; align-items: center;">
       <div>
         <h2 style="font-size: 16px; font-weight: 700;">Generated Shorts (9:16 Vertical)</h2>
         <p style="font-size: 12px; color: #6b7280;" id="shorts-summary">0 clips generated</p>
@@ -1527,7 +1804,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
 
     <!-- Candidate Moments Inspector -->
-    <div class="card" style="margin-top: 24px;">
+    <div class="card" id="candidates-card" style="margin-top: 24px;">
       <div class="card-title">Candidate Moments & AI Judgments</div>
       <div style="overflow-x: auto;">
         <table>
@@ -1627,27 +1904,482 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       await checkCookiesStatus();
       await pollStatus();
       await pollWatcherStatus();
+      await fetchYouTubeStatus();
+      await fetchYouTubeQueue();
       setInterval(pollStatus, 3000);
       setInterval(pollWatcherStatus, 2000);
+      setInterval(fetchYouTubeQueue, 4000);
+
+      const urlParams = new URLSearchParams(window.location.search);
+      if (urlParams.get('tab') === 'youtube') {
+        setDashboardTab('youtube');
+      }
     }
 
     function setDashboardTab(tab) {
       const panelVod = document.getElementById('panel-vod');
       const panelLive = document.getElementById('panel-live');
+      const panelYt = document.getElementById('panel-youtube');
       const tabVod = document.getElementById('tab-btn-vod');
       const tabLive = document.getElementById('tab-btn-live');
+      const tabYt = document.getElementById('tab-btn-youtube');
+      const statusPanel = document.getElementById('status-panel');
+      const galleryHeader = document.getElementById('gallery-header');
+      const shortsGrid = document.getElementById('shorts-grid');
+      const candidatesCard = document.getElementById('candidates-card');
 
       if (tab === 'vod') {
         panelVod.style.display = 'grid';
         panelLive.style.display = 'none';
+        panelYt.style.display = 'none';
+        if (statusPanel) statusPanel.style.display = 'block';
+        if (galleryHeader) galleryHeader.style.display = 'flex';
+        if (shortsGrid) shortsGrid.style.display = 'grid';
+        if (candidatesCard) candidatesCard.style.display = 'block';
         tabVod.className = 'primary';
         tabLive.className = 'secondary';
-      } else {
+        tabYt.className = 'secondary';
+      } else if (tab === 'live') {
         panelVod.style.display = 'none';
         panelLive.style.display = 'grid';
+        panelYt.style.display = 'none';
+        if (statusPanel) statusPanel.style.display = 'block';
+        if (galleryHeader) galleryHeader.style.display = 'flex';
+        if (shortsGrid) shortsGrid.style.display = 'grid';
+        if (candidatesCard) candidatesCard.style.display = 'block';
         tabVod.className = 'secondary';
         tabLive.className = 'primary';
+        tabYt.className = 'secondary';
+      } else if (tab === 'youtube') {
+        panelVod.style.display = 'none';
+        panelLive.style.display = 'none';
+        panelYt.style.display = 'block';
+        if (statusPanel) statusPanel.style.display = 'none';
+        if (galleryHeader) galleryHeader.style.display = 'none';
+        if (shortsGrid) shortsGrid.style.display = 'none';
+        if (candidatesCard) candidatesCard.style.display = 'none';
+        tabVod.className = 'secondary';
+        tabLive.className = 'secondary';
+        tabYt.className = 'primary';
+        refreshYouTubeTab();
       }
+    }
+
+    // ---------------------------------------------------------------------------
+    // YouTube Integration & Upload Queue Logic
+    // ---------------------------------------------------------------------------
+    let ytAvailableShorts = [];
+    let ytSelectedPaths = new Set();
+    let ytQueuePollTimer = null;
+
+    async function fetchYouTubeStatus() {
+      try {
+        const res = await fetch('/api/youtube/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        const disc = document.getElementById('yt-channel-disconnected');
+        const conn = document.getElementById('yt-channel-connected');
+        const btnConn = document.getElementById('btn-yt-connect');
+        const btnDisc = document.getElementById('btn-yt-disconnect');
+
+        if (data.connected && data.has_channel !== false) {
+          disc.style.display = 'none';
+          conn.style.display = 'flex';
+          btnConn.style.display = 'none';
+          btnDisc.style.display = 'inline-flex';
+
+          document.getElementById('yt-channel-title').textContent = data.title || 'YouTube Channel';
+          if (data.avatar_url) {
+            document.getElementById('yt-channel-avatar').src = data.avatar_url;
+            document.getElementById('yt-channel-avatar').style.display = 'block';
+          } else {
+            document.getElementById('yt-channel-avatar').style.display = 'none';
+          }
+          document.getElementById('yt-channel-subs').textContent = `${(data.subscriber_count || 0).toLocaleString()} subscribers`;
+          document.getElementById('yt-channel-videos').textContent = `${(data.video_count || 0).toLocaleString()} videos`;
+          const link = document.getElementById('yt-channel-link');
+          if (data.custom_url) {
+            link.href = `https://www.youtube.com/${data.custom_url.replace(/^@/, '')}`;
+          } else if (data.channel_id) {
+            link.href = `https://www.youtube.com/channel/${data.channel_id}`;
+          }
+        } else {
+          disc.style.display = 'flex';
+          conn.style.display = 'none';
+          btnConn.style.display = 'inline-flex';
+          btnDisc.style.display = 'none';
+        }
+      } catch (e) {
+        console.error('Failed to fetch YouTube status:', e);
+      }
+    }
+
+    async function connectYouTube() {
+      try {
+        const res = await fetch('/api/youtube/auth-url');
+        if (!res.ok) {
+          const err = await res.json();
+          alert('Error preparing YouTube authorization: ' + (err.detail || 'Check client secret JSON file.'));
+          return;
+        }
+        const data = await res.json();
+        const width = 600, height = 750;
+        const left = (window.innerWidth - width) / 2;
+        const top = (window.innerHeight - height) / 2;
+        const popup = window.open(data.auth_url, 'yt_oauth', `width=${width},height=${height},top=${top},left=${left}`);
+        if (!popup || popup.closed || typeof popup.closed === 'undefined') {
+          window.location.href = data.auth_url;
+        }
+      } catch (err) {
+        alert('Could not start YouTube OAuth flow: ' + err);
+      }
+    }
+
+    window.addEventListener('message', async (event) => {
+      if (event.data && event.data.type === 'YOUTUBE_AUTH_SUCCESS') {
+        await fetchYouTubeStatus();
+        alert('YouTube channel connected successfully!');
+      } else if (event.data && event.data.type === 'YOUTUBE_AUTH_ERROR') {
+        alert('YouTube authorization error: ' + event.data.error);
+      }
+    });
+
+    async function disconnectYouTube() {
+      if (!confirm('Are you sure you want to disconnect this YouTube channel?')) return;
+      try {
+        const res = await fetch('/api/youtube/disconnect', { method: 'POST' });
+        if (res.ok) {
+          await fetchYouTubeStatus();
+        }
+      } catch (e) {
+        alert('Error disconnecting YouTube: ' + e);
+      }
+    }
+
+    async function loadYouTubeLibrary() {
+      try {
+        const res = await fetch('/api/shorts');
+        if (!res.ok) return;
+        const data = await res.json();
+        ytAvailableShorts = data.shorts || [];
+        renderYouTubeLibraryList();
+      } catch (e) {
+        console.error('Failed to load shorts library for YouTube tab:', e);
+      }
+    }
+
+    function renderYouTubeLibraryList() {
+      const container = document.getElementById('yt-shorts-selection-list');
+      const subtitle = document.getElementById('yt-library-subtitle');
+      if (!container) return;
+
+      if (!ytAvailableShorts || ytAvailableShorts.length === 0) {
+        container.innerHTML = `
+          <div style="text-align: center; padding: 40px 10px; color: #9ca3af; font-size: 12px;">
+            No rendered Shorts found yet.<br>Generate Shorts from VOD mode or Live Watcher first.
+          </div>`;
+        if (subtitle) subtitle.textContent = '0 produced Shorts available';
+        return;
+      }
+
+      if (subtitle) subtitle.textContent = `${ytAvailableShorts.length} produced Shorts available`;
+
+      container.innerHTML = ytAvailableShorts.map((s, idx) => {
+        const isChecked = ytSelectedPaths.has(s.path);
+        const titleText = escapeHtml(s.title || s.filename || 'Untitled Short');
+        const hookText = s.suggested_hook ? escapeHtml(s.suggested_hook) : '';
+        const durText = s.end_seconds && s.start_seconds ? `${Math.round(s.end_seconds - s.start_seconds)}s` : '';
+        const sizeText = s.size_mb ? `${s.size_mb} MB` : '';
+        const creatorTag = s.channel ? `@${escapeHtml(s.channel)}` : '';
+
+        return `
+          <div style="display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid ${isChecked ? '#2563eb' : '#e5e7eb'}; background: ${isChecked ? '#eff6ff' : '#ffffff'}; border-radius: 6px; transition: border 0.15s;">
+            <input type="checkbox" class="yt-lib-check" data-path="${escapeHtml(s.path)}" data-idx="${idx}" ${isChecked ? 'checked' : ''} onchange="toggleShortSelection('${escapeHtml(s.path)}', this.checked)" style="width: 16px; height: 16px; cursor: pointer;">
+            <div style="width: 36px; height: 60px; background: #000; border-radius: 4px; overflow: hidden; position: relative; flex-shrink: 0; cursor: pointer;" onclick="playShort('${escapeHtml(s.path)}', '${titleText}', '${hookText}', '')">
+              <video src="${s.url}" style="width: 100%; height: 100%; object-fit: cover;" preload="metadata"></video>
+              <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.25); color: #fff; font-size: 11px;">▶</div>
+            </div>
+            <div style="flex: 1; min-width: 0;">
+              <div style="font-size: 13px; font-weight: 600; color: #111827; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${titleText}</div>
+              ${hookText ? `<div style="font-size: 11px; color: #dc2626; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${hookText}</div>` : ''}
+              <div style="font-size: 11px; color: #6b7280; display: flex; gap: 8px; margin-top: 2px;">
+                ${durText ? `<span>${durText}</span>` : ''}
+                ${sizeText ? `<span>${sizeText}</span>` : ''}
+                ${creatorTag ? `<span style="color: #4b5563;">${creatorTag}</span>` : ''}
+              </div>
+            </div>
+            <button class="btn-xs secondary" onclick="addSingleShortToQueue(${idx})" title="Add directly to upload queue" style="flex-shrink: 0;">
+              + Queue
+            </button>
+          </div>
+        `;
+      }).join('');
+
+      updateSelectionButton();
+    }
+
+    function toggleShortSelection(path, isChecked) {
+      if (isChecked) {
+        ytSelectedPaths.add(path);
+      } else {
+        ytSelectedPaths.delete(path);
+      }
+      renderYouTubeLibraryList();
+    }
+
+    function selectAllShortsForQueue(checked) {
+      if (checked) {
+        ytAvailableShorts.forEach(s => ytSelectedPaths.add(s.path));
+      } else {
+        ytSelectedPaths.clear();
+      }
+      renderYouTubeLibraryList();
+    }
+
+    function updateSelectionButton() {
+      const btn = document.getElementById('btn-add-selected-to-queue');
+      if (!btn) return;
+      const count = ytSelectedPaths.size;
+      btn.textContent = `➕ Add Selected to Upload Queue (${count})`;
+      btn.disabled = (count === 0);
+    }
+
+    async function addSingleShortToQueue(idx) {
+      const s = ytAvailableShorts[idx];
+      if (!s) return;
+      try {
+        const payload = [{
+          video_path: s.path,
+          title: s.suggested_hook ? `${s.suggested_hook} | ${s.title || ''}` : (s.title || s.filename),
+          description: s.summary || `Exciting highlight Short from ${s.channel || 'stream'}! #Shorts`,
+          privacy: 'public',
+        }];
+        const res = await fetch('/api/youtube/queue/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: payload }),
+        });
+        if (res.ok) {
+          await fetchYouTubeQueue();
+        }
+      } catch (e) {
+        alert('Error adding to queue: ' + e);
+      }
+    }
+
+    async function addSelectedShortsToQueue() {
+      if (ytSelectedPaths.size === 0) return;
+      const selected = ytAvailableShorts.filter(s => ytSelectedPaths.has(s.path));
+      const payload = selected.map(s => ({
+        video_path: s.path,
+        title: s.suggested_hook ? `${s.suggested_hook} | ${s.title || ''}` : (s.title || s.filename),
+        description: s.summary || `Exciting highlight Short from ${s.channel || 'stream'}! #Shorts`,
+        privacy: 'public',
+      }));
+
+      try {
+        const res = await fetch('/api/youtube/queue/add', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items: payload }),
+        });
+        if (res.ok) {
+          ytSelectedPaths.clear();
+          renderYouTubeLibraryList();
+          await fetchYouTubeQueue();
+        }
+      } catch (e) {
+        alert('Error adding selected shorts to queue: ' + e);
+      }
+    }
+
+    async function fetchYouTubeQueue() {
+      try {
+        const res = await fetch('/api/youtube/queue');
+        if (!res.ok) return;
+        const data = await res.json();
+        const queue = data.queue || [];
+        renderYouTubeQueueList(queue, data.is_uploading);
+
+        const badge = document.getElementById('nav-queue-badge');
+        if (badge) {
+          if (queue.length > 0) {
+            badge.style.display = 'inline-flex';
+            badge.textContent = queue.length;
+          } else {
+            badge.style.display = 'none';
+          }
+        }
+
+        if (data.is_uploading) {
+          if (!ytQueuePollTimer) {
+            ytQueuePollTimer = setInterval(fetchYouTubeQueue, 2000);
+          }
+        } else {
+          if (ytQueuePollTimer) {
+            clearInterval(ytQueuePollTimer);
+            ytQueuePollTimer = null;
+          }
+        }
+      } catch (e) {
+        console.error('Failed to fetch YouTube queue:', e);
+      }
+    }
+
+    function renderYouTubeQueueList(queue, isUploading) {
+      const container = document.getElementById('yt-queue-list');
+      const summary = document.getElementById('yt-queue-summary');
+      const btnStart = document.getElementById('btn-start-queue-upload');
+      if (!container) return;
+
+      const pendingCount = queue.filter(q => q.status === 'pending').length;
+      if (summary) {
+        summary.textContent = `${queue.length} items (${pendingCount} pending)`;
+      }
+
+      if (btnStart) {
+        if (isUploading) {
+          btnStart.disabled = true;
+          btnStart.textContent = '⏳ Upload In Progress...';
+        } else {
+          btnStart.disabled = (pendingCount === 0);
+          btnStart.textContent = `🚀 Upload All Pending (${pendingCount})`;
+        }
+      }
+
+      if (!queue || queue.length === 0) {
+        container.innerHTML = `
+          <div style="text-align: center; padding: 40px 10px; color: #9ca3af; font-size: 12px;">
+            Your upload queue is empty.<br>Check videos on the left and click "Add Selected to Upload Queue".
+          </div>`;
+        return;
+      }
+
+      container.innerHTML = queue.map(item => {
+        const titleVal = escapeHtml(item.title || '');
+        const privacy = item.privacy || 'public';
+
+        let statusBadge = '';
+        if (item.status === 'pending') {
+          statusBadge = '<span class="badge">⏳ Pending</span>';
+        } else if (item.status === 'uploading') {
+          statusBadge = `<span class="badge badge-active">🚀 Uploading ${item.progress || 0}%</span>`;
+        } else if (item.status === 'completed') {
+          statusBadge = '<span class="badge badge-success">✓ Live on YouTube</span>';
+        } else if (item.status === 'failed') {
+          statusBadge = `<span class="badge badge-danger" title="${escapeHtml(item.error || 'Failed')}">✕ Failed</span>`;
+        }
+
+        return `
+          <div style="border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px; background: #ffffff;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <div style="display: flex; align-items: center; gap: 8px;">
+                ${statusBadge}
+                <span style="font-size: 11px; color: #6b7280;">${escapeHtml(item.file_name)}</span>
+              </div>
+              <button class="btn-xs secondary btn-danger-subtle" onclick="removeFromQueue('${item.id}')" title="Remove from queue">✕</button>
+            </div>
+
+            ${item.status === 'uploading' ? `
+              <div class="progress-bar-bg" style="margin-bottom: 10px; height: 6px;">
+                <div class="progress-bar-fill" style="width: ${item.progress || 0}%;"></div>
+              </div>` : ''}
+
+            ${item.shorts_url ? `
+              <div style="margin-bottom: 10px; padding: 8px; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 4px; display: flex; justify-content: space-between; align-items: center;">
+                <span style="font-size: 12px; color: #065f46; font-weight: 500;">Short published successfully!</span>
+                <a href="${item.shorts_url}" target="_blank" style="font-size: 12px; color: #2563eb; font-weight: 600; text-decoration: none;">Open Short ↗</a>
+              </div>` : ''}
+
+            ${item.error ? `
+              <div style="margin-bottom: 8px; font-size: 11px; color: #dc2626; background: #fef2f2; padding: 6px; border-radius: 4px;">
+                ${escapeHtml(item.error)}
+              </div>` : ''}
+
+            <div style="margin-bottom: 8px;">
+              <label style="font-size: 11px; margin-bottom: 2px;">Short Title</label>
+              <input type="text" value="${titleVal}" onchange="updateQueueItemMetadata('${item.id}', 'title', this.value)" style="padding: 5px 8px; font-size: 12px;" ${item.status !== 'pending' ? 'readonly' : ''}>
+            </div>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+              <div>
+                <label style="font-size: 11px; margin-bottom: 2px;">Visibility</label>
+                <select onchange="updateQueueItemMetadata('${item.id}', 'privacy', this.value)" style="padding: 5px 8px; font-size: 12px;" ${item.status !== 'pending' ? 'disabled' : ''}>
+                  <option value="public" ${privacy === 'public' ? 'selected' : ''}>Public</option>
+                  <option value="unlisted" ${privacy === 'unlisted' ? 'selected' : ''}>Unlisted</option>
+                  <option value="private" ${privacy === 'private' ? 'selected' : ''}>Private</option>
+                </select>
+              </div>
+              <div style="display: flex; align-items: flex-end;">
+                ${item.status === 'pending' ? `
+                  <button class="primary" onclick="uploadQueueItemDirect('${item.id}')" style="width: 100%; padding: 5px 8px; font-size: 11px; justify-content: center;">
+                    Upload Now
+                  </button>` : ''}
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function updateQueueItemMetadata(itemId, key, value) {
+      try {
+        const payload = { item_id: itemId, updates: { [key]: value } };
+        await fetch('/api/youtube/queue/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+      } catch (e) {
+        console.error('Failed to update queue item:', e);
+      }
+    }
+
+    async function removeFromQueue(itemId) {
+      try {
+        const res = await fetch('/api/youtube/queue/remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ item_id: itemId }),
+        });
+        if (res.ok) {
+          await fetchYouTubeQueue();
+        }
+      } catch (e) {
+        alert('Error removing item: ' + e);
+      }
+    }
+
+    async function clearCompletedQueue() {
+      try {
+        const res = await fetch('/api/youtube/queue/clear', { method: 'POST' });
+        if (res.ok) {
+          await fetchYouTubeQueue();
+        }
+      } catch (e) {
+        alert('Error clearing queue: ' + e);
+      }
+    }
+
+    async function startQueueUpload() {
+      try {
+        const res = await fetch('/api/youtube/queue/start', { method: 'POST' });
+        if (res.ok) {
+          await fetchYouTubeQueue();
+        }
+      } catch (e) {
+        alert('Error starting upload: ' + e);
+      }
+    }
+
+    async function uploadQueueItemDirect(itemId) {
+      await startQueueUpload();
+    }
+
+    async function refreshYouTubeTab() {
+      await fetchYouTubeStatus();
+      await loadYouTubeLibrary();
+      await fetchYouTubeQueue();
     }
 
     async function loadAllShorts() {
