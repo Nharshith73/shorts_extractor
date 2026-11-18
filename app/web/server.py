@@ -1844,6 +1844,26 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- Viral Reach & Algorithm Strategy Card -->
+      <div style="margin-bottom: 20px; padding: 14px 18px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; font-size: 11px; box-shadow: 0 1px 2px rgba(0,0,0,0.02);">
+        <div>
+          <div style="font-weight: 700; color: #0f172a; margin-bottom: 3px;">⚡ The 0.5s Hook Rule</div>
+          <div style="color: #64748b; line-height: 1.4;">Algorithm halts impressions if swipe-away > 30%. Your shorts now start directly on action with bold burned-in hooks.</div>
+        </div>
+        <div>
+          <div style="font-weight: 700; color: #0f172a; margin-bottom: 3px;">🎯 Target Retention: >100%</div>
+          <div style="color: #64748b; line-height: 1.4;">15–20s tight clips achieve 100%+ average percentage viewed on the first loop, signaling YouTube to blast it to thousands.</div>
+        </div>
+        <div>
+          <div style="font-weight: 700; color: #0f172a; margin-bottom: 3px;">📅 Optimal Posting Cadence</div>
+          <div style="color: #64748b; line-height: 1.4;">Post 1 to 2 Shorts per day (peak hours: 4 PM – 8 PM). Never upload 5+ at once to avoid spam limits.</div>
+        </div>
+        <div>
+          <div style="font-weight: 700; color: #0f172a; margin-bottom: 3px;">💬 Pin a Conversation Comment</div>
+          <div style="color: #64748b; line-height: 1.4;">Comments are weighted 3x heavier than likes. Pin a spicy question right after uploading to start debates.</div>
+        </div>
+      </div>
+
       <!-- Main Queue & Selection Grid -->
       <div class="grid-2" style="grid-template-columns: 1.15fr 0.85fr; align-items: start; gap: 20px;">
         <!-- Left: Rendered Shorts Selector Library -->

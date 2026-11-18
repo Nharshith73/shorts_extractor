@@ -246,9 +246,12 @@ class ViralMetadataGenerator:
             )
 
             data = json.loads(raw_json)
-            title = data.get("title", "").strip().strip('"\'')
-            if "#Shorts" not in title and "#shorts" not in title:
-                title = f"{title} #Shorts"
+            raw_title = data.get("title", "").strip().strip('"\'')
+            # Strip stray hashtags from title body to keep title clean on mobile
+            clean_t = re.sub(r"#\w+", "", raw_title).strip()
+            if len(clean_t) > 42:
+                clean_t = clean_t[:42].rsplit(" ", 1)[0].strip()
+            title = f"{clean_t} #Shorts"
 
             hook = data.get("suggested_hook", "WHAT JUST HAPPENED?! 💀").strip().upper()
             cta = data.get("call_to_action", random.choice(CALLS_TO_ACTION)).strip()
@@ -305,6 +308,12 @@ class ViralMetadataGenerator:
             clean_q = quote_match.strip(' "“’\'')
             if clean_q and not any(t in clean_q.lower() for t in ("chat surged", "baseline", "messages in")):
                 title = f"{clean_q.upper()} 💀 #Shorts"
+
+        # Ensure clean, punchy title under 50 chars with exactly one #Shorts
+        clean_t = re.sub(r"#\w+", "", title).strip()
+        if len(clean_t) > 42:
+            clean_t = clean_t[:42].rsplit(" ", 1)[0].strip()
+        title = f"{clean_t} #Shorts"
 
         # 2. Hook Generation
         hook_options = ON_SCREEN_HOOKS.get(detected_archetype, ON_SCREEN_HOOKS["general"])
@@ -466,14 +475,14 @@ class ViralMetadataGenerator:
             "",
             summary.strip(),
             "",
+            f"💬 {cta}",
+            "",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             f"📺 Streamer: {creator_tag}",
-            "🌟 Daily Viral GTA & Stream Highlights",
+            "🌟 Daily Viral GTA & Stream Moments",
+            "👉 Drop a LIKE & SUBSCRIBE for daily shorts! 🔔",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
-            f"💬 {cta}",
-            "👉 LIKE & SUBSCRIBE for daily viral gaming shorts! 🔔",
-            "",
-            full_hashtag_cloud,
+            "#Shorts #Gaming #GTA6 #GTAV #GTARP",
         ]
         return "\n".join(lines).strip()
