@@ -225,12 +225,16 @@ def process_job(queue, row, provider, args):
     import tempfile
     for clip in selected_clips(work, ranks={int(c['rank']) for c in candidates}) if candidates else []:
         info = probe_media(source)
+        # Transcribe buffered audio (+14s lookforward) so Whisper transcribes past candidate end to capture punchlines
+        buf_start = max(0.0, clip.start - 8.0)
+        buf_end = min(info.duration, clip.end + 14.0)
+        buf_clip = replace(clip, start=buf_start, end=buf_end)
         with tempfile.TemporaryDirectory(dir=work) as tmp:
-            transcript, _, _ = clip_transcript(clip, work, render_config, info, Path(tmp), transcriber)
+            transcript, _, _ = clip_transcript(buf_clip, work, render_config, info, Path(tmp), transcriber)
         segments = []
         for seg in transcript.segments:
-            item = asdict(seg); item['start'] += clip.start; item['end'] += clip.start
-            for word in item['words']: word['start'] += clip.start; word['end'] += clip.start; word['word'] = word.pop('text')
+            item = asdict(seg); item['start'] += buf_start; item['end'] += buf_start
+            for word in item['words']: word['start'] += buf_start; word['end'] += buf_start; word['word'] = word.pop('text')
             segments.append(item)
         save(work / '.transcripts' / f'context-{clip.metadata["window_id"]}.json', {'language': transcript.language, 'segments': segments})
         load_candidate_context(clip.metadata['window_id'], work, clip.metadata, source, args.max_frames)
@@ -251,7 +255,9 @@ def process_job(queue, row, provider, args):
         rec_start = r.recommended_start_seconds
         rec_end = r.recommended_end_seconds
 
-        # Check speech segments to snap start/end to full sentence boundaries
+        # Check speech segments to snap start/end to full sentence boundaries with generous reaction padding
+        snapped_s = clip.start
+        snapped_e = clip.end
         ctx_file = work / 'context' / clip.metadata['window_id'] / 'context.json'
         if ctx_file.is_file():
             try:
@@ -260,19 +266,19 @@ def process_job(queue, row, provider, args):
                 if speech_segs:
                     snapped_s, snapped_e = snap_to_speech_boundaries(
                         clip.start, clip.end, clip.metadata.get('peak_seconds', clip.start), speech_segs,
-                        min_duration=args.min_duration, max_duration=args.max_duration
+                        min_duration=args.min_duration, max_duration=args.max_duration,
+                        reaction_padding=1.8
                     )
-                    if abs(rec_start - clip.start) < 0.2:
-                        rec_start = snapped_s
-                    if abs(rec_end - clip.end) < 0.2:
-                        rec_end = snapped_e
             except Exception as exc:
                 LOGGER.debug("Could not snap speech boundaries: %s", exc)
 
-        ctx_start = max(0.0, min(clip.start, rec_start) - 1.0)
-        ctx_end = min(manifest['duration'], max(clip.end, rec_end) + 1.0)
-        boundary = resolve_boundaries(clip.start, clip.end, manifest['duration'], rec_start,
-            rec_end, r.confidence, r.context_complete, args.min_duration, args.max_duration,
+        final_rec_s = min(rec_start, snapped_s) if rec_start is not None else snapped_s
+        final_rec_e = max(rec_end, snapped_e) if rec_end is not None else snapped_e
+
+        ctx_start = max(0.0, min(clip.start, snapped_s, final_rec_s) - 1.0)
+        ctx_end = min(manifest['duration'], max(clip.end, snapped_e, final_rec_e) + 2.0)
+        boundary = resolve_boundaries(snapped_s, snapped_e, manifest['duration'], final_rec_s,
+            final_rec_e, r.confidence, True, args.min_duration, args.max_duration,
             args.boundary_confidence, args.boundary_refinement, context_start=ctx_start, context_end=ctx_end)
         save(output / 'boundaries' / (clip.metadata['window_id'] + '.json'), boundary)
         clip = replace(clip, start=boundary['applied'][0], end=boundary['applied'][1])

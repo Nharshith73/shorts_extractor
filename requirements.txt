@@ -7,3 +7,5 @@ ctranslate2>=4.9.0,<5
 av>=11,<14
 pydantic>=2,<3
 httpx>=0.27,<1
+streamlink>=8.0.0
+websocket-client>=1.8.0

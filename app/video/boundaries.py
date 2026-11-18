@@ -9,14 +9,15 @@ def snap_to_speech_boundaries(
     peak: float,
     segments: Sequence[Any],
     min_duration: float = 15.0,
-    max_duration: float = 45.0,
+    max_duration: float = 60.0,
     max_lookback: float = 8.0,
-    max_lookforward: float = 8.0,
+    max_lookforward: float = 14.0,
+    reaction_padding: float = 1.8,
 ) -> tuple[float, float]:
     """Snap candidate window boundaries to sentence beginnings and punchline ends.
     
     Prevents cutting speakers off mid-word or mid-sentence and ensures the comedic
-    or dramatic setup is fully included.
+    or dramatic setup is fully included, followed by natural reaction breathing room.
     """
     if not segments:
         return start, end
@@ -38,15 +39,39 @@ def snap_to_speech_boundaries(
                     best_start = w_start
                     break
 
-    # 2. Look forward from end to find where the sentence/reaction ends
+    # 2. Look forward from end to avoid mid-sentence cutoffs and provide reaction padding
     best_end = end
     lookforward_ceiling = end + max_lookforward
-    for s in reversed(segments):
+    found_segment = False
+
+    # Check if a segment is currently underway across 'end' (mid-sentence cutoff)
+    for s in segments:
         s_start = float(getattr(s, "start", 0.0) if hasattr(s, "start") else (s.get("start", 0.0) if isinstance(s, dict) else 0.0))
         s_end = float(getattr(s, "end", 0.0) if hasattr(s, "end") else (s.get("end", 0.0) if isinstance(s, dict) else 0.0))
-        if end - 1.0 <= s_end <= lookforward_ceiling:
-            best_end = s_end
+        if s_start <= end <= s_end:
+            best_end = s_end + reaction_padding
+            found_segment = True
             break
+
+    # If not actively mid-segment, look for closest trailing sentence within lookforward ceiling
+    if not found_segment:
+        for s in reversed(segments):
+            s_start = float(getattr(s, "start", 0.0) if hasattr(s, "start") else (s.get("start", 0.0) if isinstance(s, dict) else 0.0))
+            s_end = float(getattr(s, "end", 0.0) if hasattr(s, "end") else (s.get("end", 0.0) if isinstance(s, dict) else 0.0))
+            if end - 1.5 <= s_end <= lookforward_ceiling:
+                best_end = s_end + reaction_padding
+                found_segment = True
+                break
+
+    # If speech ended right inside the clip, ensure at least reaction_padding breathing room
+    if not found_segment:
+        last_speech_end = 0.0
+        for s in segments:
+            s_end = float(getattr(s, "end", 0.0) if hasattr(s, "end") else (s.get("end", 0.0) if isinstance(s, dict) else 0.0))
+            if s_end <= end:
+                last_speech_end = max(last_speech_end, s_end)
+        if last_speech_end > 0 and (end - last_speech_end) < reaction_padding:
+            best_end = last_speech_end + reaction_padding
 
     # 3. Enforce adaptive bounds [min_duration, max_duration]
     dur = best_end - best_start

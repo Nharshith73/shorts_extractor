@@ -251,7 +251,7 @@ def test_snap_to_speech_boundaries():
         {"start": 18.2, "end": 22.0, "text": "Hahaha, no way!"},
     ]
 
-    # Raw candidate was 13.0 to 20.0
+    # Raw candidate was 13.0 to 20.0 with 0 padding
     s_start, s_end = snap_to_speech_boundaries(
         start=13.0,
         end=20.0,
@@ -261,9 +261,25 @@ def test_snap_to_speech_boundaries():
         max_duration=30.0,
         max_lookback=5.0,
         max_lookforward=5.0,
+        reaction_padding=0.0,
     )
     assert s_start == 10.5
     assert s_end == 22.0
+
+    # With reaction padding to prevent abrupt cuts
+    s_start_pad, s_end_pad = snap_to_speech_boundaries(
+        start=13.0,
+        end=20.0,
+        peak=16.0,
+        segments=segments,
+        min_duration=10.0,
+        max_duration=30.0,
+        max_lookback=5.0,
+        max_lookforward=5.0,
+        reaction_padding=1.8,
+    )
+    assert s_start_pad == 10.5
+    assert s_end_pad == 23.8
 
 
 def test_web_studio_dashboard_full_management(tmp_path, monkeypatch):

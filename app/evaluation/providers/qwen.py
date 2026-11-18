@@ -31,15 +31,81 @@ class QwenProviderConfig:
     endpoint_url: str = "http://127.0.0.1:8080/v1"
     model_name: str = "Qwen2.5-VL-7B-Instruct-Q4_K_M"
     n_gpu_layers: int = 99  # 99 = full GPU offloading; 0 = CPU fallback
-    n_ctx: int = 6144
-    max_output_tokens: int = 1024
+    n_ctx: int = 8192
+    max_output_tokens: int = 2500
     temperature: float = 0.1
     timeout_seconds: float = 60.0
     max_frames: int = 8
-    max_retries: int = 2
+    max_retries: int = 3
     auto_start_server: bool = True
     server_host: str = "127.0.0.1"
     server_port: int = 8080
+
+
+def clean_and_repair_json(text: str) -> dict[str, Any]:
+    """Clean markdown fences and repair truncated JSON from model output."""
+    clean = text.strip()
+    if clean.startswith("```"):
+        lines = clean.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        clean = "\n".join(lines).strip()
+
+    # 1. Direct parse attempt
+    try:
+        return json.loads(clean)
+    except Exception:
+        pass
+
+    # 2. Extract substring between first { and last }
+    start_brace = clean.find("{")
+    if start_brace != -1:
+        end_brace = clean.rfind("}")
+        if end_brace != -1 and end_brace > start_brace:
+            candidate = clean[start_brace : end_brace + 1]
+            try:
+                return json.loads(candidate)
+            except Exception:
+                pass
+
+    # 3. Truncation repair: balance unclosed quotes, brackets, and braces
+    if start_brace != -1:
+        truncated = clean[start_brace:]
+        in_string = False
+        escape = False
+        open_stack = []
+        for ch in truncated:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if not in_string:
+                if ch in "{[":
+                    open_stack.append("}" if ch == "{" else "]")
+                elif ch in "}]":
+                    if open_stack and open_stack[-1] == ch:
+                        open_stack.pop()
+
+        repaired = truncated
+        if in_string:
+            repaired += '"'
+        while open_stack:
+            repaired += open_stack.pop()
+
+        try:
+            return json.loads(repaired)
+        except Exception:
+            pass
+
+    # Re-raise standard json.loads so caller receives the original syntax error
+    return json.loads(clean)
 
 
 class QwenVisionLanguageProvider:
@@ -220,7 +286,7 @@ class QwenVisionLanguageProvider:
                 raw_json, telemetry = self._call_completion(
                     messages, timeout_seconds=timeout_seconds
                 )
-                parsed_data = json.loads(raw_json)
+                parsed_data = clean_and_repair_json(raw_json)
 
                 # Ensure candidate_id matches
                 parsed_data["candidate_id"] = context.candidate_id
@@ -246,7 +312,8 @@ class QwenVisionLanguageProvider:
                 )
                 last_error = exc
                 if attempt < self.config.max_retries:
-                    # Append corrective message for retry
+                    # Clean re-prompt without unbounded multimodal token accumulation
+                    messages = self._build_prompt_messages(context)
                     messages.append(
                         {
                             "role": "user",
@@ -321,8 +388,13 @@ class QwenVisionLanguageProvider:
             "   - 'inference': Your own deductive interpretation.\n"
             "2. Never fabricate dialogue, spoken words, or player speech not in the transcript.\n"
             "3. If nothing exciting occurs, assign a low rating (0-2) and state the rejection reason.\n"
-            "All timestamps, including recommended boundaries, are absolute seconds from the start of the source video, never clip-relative offsets.\n"
-            "4. Output MUST be a strictly valid JSON object matching this schema:\n"
+            "4. AVOID ABRUPT CUTS:\n"
+            "   - Set recommended_start_seconds to 1.0 to 2.5 seconds BEFORE dialogue or key action begins.\n"
+            "   - Set recommended_end_seconds to at least 1.5 to 2.5 seconds AFTER the final spoken word, punchline, or reaction.\n"
+            "   - NEVER cut a clip mid-sentence or immediately when speech stops.\n"
+            "   - All timestamps are absolute seconds from the start of the source video, never clip-relative offsets.\n"
+            "5. Keep 'evidence' concise: provide 3 to 6 key observations highlighting only the critical moments. Do NOT produce excessive or redundant evidence entries.\n"
+            "6. Output MUST be a strictly valid JSON object matching this schema:\n"
             "{\n"
             '  "schema_version": "1.0",\n'
             f'  "candidate_id": "{context.candidate_id}",\n'

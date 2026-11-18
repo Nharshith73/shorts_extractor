@@ -134,7 +134,7 @@ def judge_candidates(
         LOGGER.info("Evaluating candidate %s with provider %s...", w_id, provider.model_name)
         if records and getattr(provider, "config", None):
             inter_delay = getattr(provider.config, "inter_request_delay_seconds", 0.0)
-            if inter_delay > 0:
+            if isinstance(inter_delay, (int, float)) and inter_delay > 0:
                 time.sleep(inter_delay)
 
         # Call provider

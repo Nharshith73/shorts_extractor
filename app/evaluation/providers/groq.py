@@ -315,10 +315,10 @@ class GroqHighlightJudgeProvider:
             "1. COMEDIC BANTER & SURPRISE (Rating 3 to 5): Streamer teasing, funny character appearances (e.g. guy with suspenders, weird NPCs), loud laughter, unexpected physics/fails, frantic shouting, or intense action. Rate these 3, 4, or 5 stars.\n"
             "2. MUNDANE / BORING (Rating 0 to 1): Silent driving, routine navigation with no jokes or banter, ordinary transit with no action.\n"
             "3. Ground all judgments in observable evidence: visuals, spoken dialogue, and audio energy. Never hallucinate events.\n"
-            "4. BOUNDARY TIMESTAMPS:\n"
+            "4. BOUNDARY TIMESTAMPS (AVOID ABRUPT CUTS):\n"
             "   - Inspect the speech transcript timestamps below.\n"
             "   - Set recommended_start_seconds to the exact beginning of the spoken thought or joke (never cut mid-sentence).\n"
-            "   - Set recommended_end_seconds to the clean end of the punchline, laughter, or exclamation.\n\n"
+            "   - AVOID ABRUPT CUTS: Never cut off while a speaker is still talking or laughing. Set recommended_end_seconds to at least 1.5 to 2.5 seconds AFTER the final spoken word or punchline so the laughter, streamer reaction, and comedic moment resolve naturally.\n\n"
             "Output MUST be a strictly valid JSON object matching this schema:\n"
             "{\n"
             '  "schema_version": "1.0",\n'

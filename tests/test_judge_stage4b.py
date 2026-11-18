@@ -217,10 +217,11 @@ def test_ai_judgment_record_interval_rejection() -> None:
 # ---------------------------------------------------------------------------
 def test_qwen_provider_config_defaults() -> None:
     config = QwenProviderConfig()
-    assert config.n_ctx == 6144
+    assert config.n_ctx == 8192
+    assert config.max_output_tokens == 2500
     assert config.n_gpu_layers == 99
     assert config.max_frames == 8
-    assert config.max_retries == 2
+    assert config.max_retries == 3
     assert config.auto_start_server is True
 
 
@@ -236,7 +237,8 @@ def test_judge_yaml_parsing() -> None:
     assert "judge" in data
     j = data["judge"]
     assert j["provider"] == "local-qwen"
-    assert j["n_ctx"] == 6144
+    assert j["n_ctx"] == 8192
+    assert j["max_output_tokens"] == 2500
     assert j["n_gpu_layers"] == 99
     assert j["quantization"] == "Q4_K_M"
     assert j["license"] == "Apache-2.0"
@@ -724,3 +726,39 @@ def test_real_qwen_inference_smoke() -> None:
     assert record.confidence >= 0.0 and record.confidence <= 1.0
     assert len(record.evidence) >= 1
     assert record.model_metadata.get("tokens_per_second", 0) > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Test 12: clean_and_repair_json Robustness
+# ---------------------------------------------------------------------------
+def test_clean_and_repair_json_variants() -> None:
+    from app.evaluation.providers.qwen import clean_and_repair_json
+
+    # 1. Standard valid JSON
+    valid = '{"candidate_id": "abc", "editorial_rating": 4}'
+    res = clean_and_repair_json(valid)
+    assert res["candidate_id"] == "abc"
+    assert res["editorial_rating"] == 4
+
+    # 2. Markdown fenced JSON
+    fenced = '```json\n{"candidate_id": "abc", "editorial_rating": 5}\n```'
+    res = clean_and_repair_json(fenced)
+    assert res["editorial_rating"] == 5
+
+    # 3. Conversational commentary wrapper
+    wrapped = 'Here is the requested evaluation:\n{"candidate_id": "abc", "editorial_rating": 3}\nHope this helps!'
+    res = clean_and_repair_json(wrapped)
+    assert res["editorial_rating"] == 3
+
+    # 4. Truncated mid-string and unclosed object (token ceiling simulation)
+    truncated_string = '{"candidate_id": "abc", "summary": "The player drove across the bridge'
+    res = clean_and_repair_json(truncated_string)
+    assert res["candidate_id"] == "abc"
+    assert "drove across the bridge" in res["summary"]
+
+    # 5. Truncated nested array and objects
+    truncated_nested = '{"candidate_id": "abc", "evidence": [{"timestamp": 14.2, "observation": "Explosion'
+    res = clean_and_repair_json(truncated_nested)
+    assert res["candidate_id"] == "abc"
+    assert isinstance(res["evidence"], list)
+    assert res["evidence"][0]["observation"] == "Explosion"

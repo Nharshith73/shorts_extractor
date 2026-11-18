@@ -26,8 +26,8 @@ judge:
   gpu_device_id: 0
 
   # Inference parameters
-  n_ctx: 6144
-  max_output_tokens: 1024
+  n_ctx: 8192
+  max_output_tokens: 2500
   temperature: 0.1
   timeout_seconds: 60.0
 
@@ -37,6 +37,6 @@ judge:
   frame_max_height: 360
 
   # Robustness & retry policy
-  max_retries: 2
+  max_retries: 3
   retry_delay_seconds: 1.0
   auto_start_server: true    # Automatically launch llama-server.exe if not running

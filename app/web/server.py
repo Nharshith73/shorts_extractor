@@ -23,6 +23,7 @@ import subprocess
 import threading
 import time
 from typing import Any
+import urllib.parse
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,6 +53,18 @@ app.add_middleware(
 
 # Active background jobs tracking
 ACTIVE_TASKS: dict[str, dict[str, Any]] = {}
+
+
+def sanitize_task(task_dict: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not task_dict:
+        return None
+    return {
+        "status": task_dict.get("status"),
+        "logs": task_dict.get("logs", []),
+        "started_at": task_dict.get("started_at"),
+        "returncode": task_dict.get("returncode"),
+        "error": task_dict.get("error"),
+    }
 
 
 def get_db():
@@ -197,6 +210,48 @@ def api_cleanup(req: CleanupRequest):
     return {"status": "CLEANED", "cleaned": cleaned}
 
 
+@app.get("/api/shorts")
+def api_list_shorts():
+    """List all rendered 9:16 Shorts across completed VOD jobs and live Twitch watcher runs."""
+    shorts = []
+    if not COMPLETED_DIR.is_dir():
+        return {"shorts": []}
+
+    for mp4 in COMPLETED_DIR.rglob("shorts/*.mp4"):
+        if not mp4.is_file():
+            continue
+        try:
+            st = mp4.stat()
+            meta_json = mp4.parent.parent / "metadata" / f"{mp4.stem}.json"
+            meta: dict[str, Any] = {}
+            if meta_json.is_file():
+                try:
+                    meta = json.loads(meta_json.read_text(encoding="utf-8"))
+                except Exception:
+                    pass
+
+            shorts.append({
+                "filename": mp4.name,
+                "path": str(mp4),
+                "url": f"/media/file?path={urllib.parse.quote(str(mp4))}",
+                "size_mb": round(st.st_size / (1024 * 1024), 2),
+                "mtime": st.st_mtime,
+                "title": meta.get("title", mp4.stem),
+                "suggested_hook": meta.get("suggested_hook"),
+                "summary": meta.get("description", ""),
+                "event_category": meta.get("event_category", "highlight"),
+                "editorial_rating": meta.get("editorial_rating", 4),
+                "start_seconds": meta.get("start_seconds"),
+                "end_seconds": meta.get("end_seconds"),
+                "channel": meta.get("channel"),
+            })
+        except Exception:
+            pass
+
+    shorts.sort(key=lambda s: s["mtime"], reverse=True)
+    return {"shorts": shorts}
+
+
 @app.delete("/api/shorts")
 def api_delete_short(path: str = Query(...)):
     target = Path(path).resolve()
@@ -269,6 +324,7 @@ def api_job_detail(source_id: str):
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
         job_data = dict(job)
+        job_data["filename"] = Path(job_data["source_path"]).name if job_data.get("source_path") else "video.mp4"
         job_data["manifest"] = json.loads(job_data["manifest"])
 
         history = conn.execute(
@@ -372,11 +428,11 @@ def api_job_detail(source_id: str):
 
         # Active background status
         if source_id in ACTIVE_TASKS:
-            job_data["active_progress"] = ACTIVE_TASKS[source_id]
+            job_data["active_progress"] = sanitize_task(ACTIVE_TASKS[source_id])
         else:
             stem = Path(job_data["source_path"]).stem
             if stem in ACTIVE_TASKS:
-                job_data["active_progress"] = ACTIVE_TASKS[stem]
+                job_data["active_progress"] = sanitize_task(ACTIVE_TASKS[stem])
 
         return job_data
     finally:
@@ -619,15 +675,7 @@ def api_download_video(req: DownloadRequest):
 @app.get("/api/settings")
 def api_get_settings():
     groq_key = resolve_groq_api_key()
-    safe_tasks = {}
-    for k, v in ACTIVE_TASKS.items():
-        safe_tasks[k] = {
-            "status": v.get("status"),
-            "logs": v.get("logs", []),
-            "started_at": v.get("started_at"),
-            "returncode": v.get("returncode"),
-            "error": v.get("error"),
-        }
+    safe_tasks = {k: sanitize_task(v) for k, v in ACTIVE_TASKS.items()}
     return {
         "groq_configured": bool(groq_key and len(groq_key) > 10),
         "groq_key_masked": f"{groq_key[:6]}...{groq_key[-4:]}" if groq_key else None,
@@ -647,6 +695,57 @@ def api_save_groq_key(key: str = Query(...)):
     except Exception:
         pass
     return {"status": "SAVED", "configured": True}
+
+
+ACTIVE_WATCHER_SESSION: Any = None
+
+
+class WatcherStartRequest(BaseModel):
+    channel: str
+    platform: str = "twitch"
+    min_messages: int = 5
+    spike_factor: float = 2.5
+    ai_mode: str = "groq"
+    layout: str = "blurred_background"
+    encoder: str = "auto"
+
+
+@app.post("/api/watcher/start")
+def api_watcher_start(req: WatcherStartRequest):
+    global ACTIVE_WATCHER_SESSION
+    if ACTIVE_WATCHER_SESSION and ACTIVE_WATCHER_SESSION.is_running:
+        return {"status": "ALREADY_RUNNING", "channel": ACTIVE_WATCHER_SESSION.channel, "platform": ACTIVE_WATCHER_SESSION.platform}
+
+    from app.live.watcher import LiveWatcherSession
+    ACTIVE_WATCHER_SESSION = LiveWatcherSession(
+        channel=req.channel,
+        output_dir=COMPLETED_DIR,
+        platform=req.platform,
+        min_messages=req.min_messages,
+        spike_factor=req.spike_factor,
+        ai_mode=req.ai_mode,
+        layout=req.layout,
+        encoder=req.encoder,
+    )
+    ACTIVE_WATCHER_SESSION.start()
+    return {"status": "STARTED", "channel": req.channel, "platform": ACTIVE_WATCHER_SESSION.platform, "session_id": ACTIVE_WATCHER_SESSION.session_id}
+
+
+@app.post("/api/watcher/stop")
+def api_watcher_stop():
+    global ACTIVE_WATCHER_SESSION
+    if ACTIVE_WATCHER_SESSION:
+        ACTIVE_WATCHER_SESSION.stop()
+        ACTIVE_WATCHER_SESSION = None
+    return {"status": "STOPPED"}
+
+
+@app.get("/api/watcher/status")
+def api_watcher_status():
+    global ACTIVE_WATCHER_SESSION
+    if not ACTIVE_WATCHER_SESSION:
+        return {"is_running": False}
+    return ACTIVE_WATCHER_SESSION.get_status()
 
 
 # Minimalist, White Background Dashboard HTML
@@ -1059,8 +1158,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </header>
 
+    <!-- Dashboard Mode Switcher Tabs -->
+    <div style="display: flex; gap: 8px; margin-bottom: 22px; border-bottom: 1px solid #e5e7eb; padding-bottom: 12px;">
+      <button id="tab-btn-vod" class="primary" onclick="setDashboardTab('vod')" style="padding: 7px 16px; font-size: 13px;">
+        📁 Video Files & VOD Mode
+      </button>
+      <button id="tab-btn-live" class="secondary" onclick="setDashboardTab('live')" style="padding: 7px 16px; font-size: 13px;">
+        🔴 Live Watcher (Twitch & Kick Spike Detection)
+      </button>
+    </div>
+
     <!-- Ingestion & Configuration Row -->
-    <div class="grid-2">
+    <div id="panel-vod" class="grid-2">
       <!-- Select or Ingest Video -->
       <div class="card">
         <div class="card-title">1. Select Video & Ingestion</div>
@@ -1160,6 +1269,115 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div style="display: flex; gap: 8px; margin-top: 10px;">
           <button style="flex: 2;" id="btn-extract" onclick="startProcessing()">Extract Real Shorts</button>
           <button class="secondary btn-danger-subtle" id="btn-stop" style="flex: 1; display: none;" onclick="stopActivePipeline()">Stop Pipeline</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live Twitch & Kick Watcher Panel -->
+    <div id="panel-live" class="grid-2" style="display: none;">
+      <!-- Card 1: Channel & Rules -->
+      <div class="card">
+        <div class="card-title">1. Live Stream Source & Trigger Rules</div>
+        
+        <div class="row">
+          <div class="form-group" style="flex: 1;">
+            <label for="live-platform">Streaming Platform</label>
+            <select id="live-platform" onchange="onPlatformChange()">
+              <option value="twitch" selected>Twitch (irc.chat.twitch.tv)</option>
+              <option value="kick">Kick (Centrifugo WebSocket)</option>
+            </select>
+          </div>
+          <div class="form-group" style="flex: 2;">
+            <label id="live-channel-label" for="live-channel">Twitch Channel Username</label>
+            <input type="text" id="live-channel" placeholder="e.g. kaicenat, rawrawknee, tarik, shroud" value="rawrawknee">
+          </div>
+        </div>
+        <span id="live-channel-hint" class="field-hint" style="margin-top: -6px; margin-bottom: 12px; display: block;">Connects anonymously to <code>irc.chat.twitch.tv:6667</code> (NICK justinfan, zero tokens required)</span>
+
+        <div class="row">
+          <div class="form-group">
+            <label for="live-min-msgs">Min Messages Threshold</label>
+            <input type="number" id="live-min-msgs" value="5" min="1" max="500">
+            <span class="field-hint">Min messages in 10s</span>
+          </div>
+          <div class="form-group">
+            <label for="live-spike-factor">Spike Sensitivity Factor</label>
+            <input type="number" id="live-spike-factor" value="2.5" step="0.1" min="1.1" max="10.0">
+            <span class="field-hint">x median of preceding 3 min</span>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="live-ai-mode">AI Highlight Judge & Viral Hook</label>
+          <select id="live-ai-mode">
+            <option value="groq" selected>Groq Cloud (Llama 3.3 70B & Vision, Free Tier)</option>
+            <option value="qwen">Local Qwen2.5-VL-7B (NVIDIA RTX 4070)</option>
+            <option value="none">Direct Fast Cut (No AI)</option>
+          </select>
+        </div>
+
+        <div class="row">
+          <div class="form-group">
+            <label for="live-layout">Vertical 9:16 Layout</label>
+            <select id="live-layout">
+              <option value="blurred_background" selected>Blurred Background (Reels Standard)</option>
+              <option value="center_crop">Center Crop 9:16</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="live-encoder">Video Encoder</label>
+            <select id="live-encoder">
+              <option value="auto" selected>Auto (Hardware NVENC)</option>
+              <option value="h264_nvenc">NVIDIA NVENC</option>
+              <option value="libx264">CPU libx264</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="display: flex; gap: 8px; margin-top: 10px;">
+          <button style="flex: 2;" id="btn-start-watcher" class="primary" onclick="startWatcher()">Start Watching Stream</button>
+          <button class="secondary btn-danger-subtle" id="btn-stop-watcher" style="flex: 1; display: none;" onclick="stopWatcher()">Stop Watcher</button>
+        </div>
+      </div>
+
+      <!-- Card 2: Real-time Telemetry & Metrics -->
+      <div class="card">
+        <div class="card-title">2. Live Telemetry & Audience Excitement Meter</div>
+
+        <div style="display: flex; gap: 8px; margin-bottom: 16px;">
+          <span class="badge" id="live-stream-badge">Stream: Inactive</span>
+          <span class="badge" id="live-irc-badge">IRC: Disconnected</span>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px;">
+          <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px;">
+            <div style="font-size: 11px; text-transform: uppercase; color: #6b7280; font-weight: 600;">Current Velocity</div>
+            <div id="live-metric-bucket" style="font-size: 24px; font-weight: 700; color: #111827; margin: 4px 0;">0</div>
+            <div style="font-size: 11px; color: #9ca3af;">msgs in current 10s</div>
+          </div>
+          <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px;">
+            <div style="font-size: 11px; text-transform: uppercase; color: #6b7280; font-weight: 600;">3-Min Median Baseline</div>
+            <div id="live-metric-median" style="font-size: 24px; font-weight: 700; color: #111827; margin: 4px 0;">0.0</div>
+            <div style="font-size: 11px; color: #9ca3af;">msgs / 10s baseline</div>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px;">
+          <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px;">
+            <div style="font-size: 11px; text-transform: uppercase; color: #6b7280; font-weight: 600;">Spikes Detected</div>
+            <div id="live-metric-spikes" style="font-size: 20px; font-weight: 700; color: #059669; margin: 4px 0;">0</div>
+            <div style="font-size: 11px; color: #9ca3af;">chat spikes triggered</div>
+          </div>
+          <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px;">
+            <div style="font-size: 11px; text-transform: uppercase; color: #6b7280; font-weight: 600;">Shorts Produced</div>
+            <div id="live-metric-shorts" style="font-size: 20px; font-weight: 700; color: #2563eb; margin: 4px 0;">0</div>
+            <div style="font-size: 11px; color: #9ca3af;">ready in gallery below</div>
+          </div>
+        </div>
+
+        <div style="background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px; font-size: 11px; color: #4b5563;">
+          <div><strong>Speech Boundary Snapping:</strong> Active (+1.8s punchline breathing room)</div>
+          <div style="margin-top: 2px;"><strong>Subtitles:</strong> faster-whisper GPU burned-in karaoke captions</div>
         </div>
       </div>
     </div>
@@ -1286,14 +1504,163 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <script>
     let currentJobId = null;
+    let lastShortsCount = 0;
 
     async function init() {
       setupDragAndDrop();
       setupMinMaxSync();
       await loadVideos();
       await loadSettings();
+      await loadAllShorts();
       await pollStatus();
+      await pollWatcherStatus();
       setInterval(pollStatus, 3000);
+      setInterval(pollWatcherStatus, 2000);
+    }
+
+    function setDashboardTab(tab) {
+      const panelVod = document.getElementById('panel-vod');
+      const panelLive = document.getElementById('panel-live');
+      const tabVod = document.getElementById('tab-btn-vod');
+      const tabLive = document.getElementById('tab-btn-live');
+
+      if (tab === 'vod') {
+        panelVod.style.display = 'grid';
+        panelLive.style.display = 'none';
+        tabVod.className = 'primary';
+        tabLive.className = 'secondary';
+      } else {
+        panelVod.style.display = 'none';
+        panelLive.style.display = 'grid';
+        tabVod.className = 'secondary';
+        tabLive.className = 'primary';
+      }
+    }
+
+    async function loadAllShorts() {
+      try {
+        const res = await fetch('/api/shorts');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.shorts && data.shorts.length > 0) {
+            renderShorts(data.shorts);
+          }
+        }
+      } catch (e) {}
+    }
+
+    function onPlatformChange() {
+      const plat = document.getElementById('live-platform').value;
+      const lbl = document.getElementById('live-channel-label');
+      const input = document.getElementById('live-channel');
+      const hint = document.getElementById('live-channel-hint');
+      if (plat === 'kick') {
+        lbl.textContent = 'Kick Channel Username or URL';
+        input.placeholder = 'e.g. westcol, xqc, adinross, https://kick.com/westcol';
+        hint.innerHTML = 'Connects anonymously via Kick Centrifugo WebSocket (Guest auth, zero tokens required)';
+      } else {
+        lbl.textContent = 'Twitch Channel Username';
+        input.placeholder = 'e.g. kaicenat, rawrawknee, tarik, shroud';
+        hint.innerHTML = 'Connects anonymously to <code>irc.chat.twitch.tv:6667</code> (NICK justinfan, zero tokens required)';
+      }
+    }
+
+    async function startWatcher() {
+      const platform = document.getElementById('live-platform').value;
+      const channel = document.getElementById('live-channel').value.trim();
+      if (!channel) {
+        alert('Please enter a ' + (platform === 'kick' ? 'Kick' : 'Twitch') + ' channel username');
+        return;
+      }
+      const minMsgs = parseInt(document.getElementById('live-min-msgs').value, 10) || 5;
+      const spikeFactor = parseFloat(document.getElementById('live-spike-factor').value) || 2.5;
+      const aiMode = document.getElementById('live-ai-mode').value;
+      const layout = document.getElementById('live-layout').value;
+      const encoder = document.getElementById('live-encoder').value;
+
+      try {
+        const res = await fetch('/api/watcher/start', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            channel: channel,
+            platform: platform,
+            min_messages: minMsgs,
+            spike_factor: spikeFactor,
+            ai_mode: aiMode,
+            layout: layout,
+            encoder: encoder
+          })
+        });
+        const data = await res.json();
+        if (data.status === 'STARTED' || data.status === 'ALREADY_RUNNING') {
+          document.getElementById('btn-start-watcher').style.display = 'none';
+          document.getElementById('btn-stop-watcher').style.display = 'inline-flex';
+          pollWatcherStatus();
+        } else {
+          alert('Could not start watcher: ' + JSON.stringify(data));
+        }
+      } catch (err) {
+        alert('Error starting watcher: ' + err);
+      }
+    }
+
+    async function stopWatcher() {
+      try {
+        await fetch('/api/watcher/stop', { method: 'POST' });
+        document.getElementById('btn-start-watcher').style.display = 'inline-flex';
+        document.getElementById('btn-stop-watcher').style.display = 'none';
+        pollWatcherStatus();
+      } catch (err) {
+        alert('Error stopping watcher: ' + err);
+      }
+    }
+
+    async function pollWatcherStatus() {
+      try {
+        const res = await fetch('/api/watcher/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        const btnStart = document.getElementById('btn-start-watcher');
+        const btnStop = document.getElementById('btn-stop-watcher');
+        const streamBadge = document.getElementById('live-stream-badge');
+        const ircBadge = document.getElementById('live-irc-badge');
+
+        if (data.is_running) {
+          const platName = (data.platform || 'TWITCH').toUpperCase();
+          if (btnStart) btnStart.style.display = 'none';
+          if (btnStop) btnStop.style.display = 'inline-flex';
+          if (streamBadge) {
+            streamBadge.textContent = `Stream: LIVE [${platName}] (${data.channel})`;
+            streamBadge.className = 'badge badge-success';
+          }
+          if (ircBadge) {
+            const isConn = data.chat_connected ?? data.irc_connected;
+            ircBadge.textContent = isConn ? `${platName} Chat: Connected` : `${platName} Chat: Connecting...`;
+            ircBadge.className = isConn ? 'badge badge-success' : 'badge badge-active';
+          }
+          document.getElementById('live-metric-bucket').textContent = data.current_bucket_count || 0;
+          document.getElementById('live-metric-median').textContent = data.current_median || '0.0';
+          document.getElementById('live-metric-spikes').textContent = data.spikes_detected || 0;
+          document.getElementById('live-metric-shorts').textContent = data.shorts_count || 0;
+
+          if (data.shorts_count > lastShortsCount) {
+            lastShortsCount = data.shorts_count;
+            loadAllShorts();
+          }
+        } else {
+          if (btnStart) btnStart.style.display = 'inline-flex';
+          if (btnStop) btnStop.style.display = 'none';
+          if (streamBadge) {
+            streamBadge.textContent = 'Stream: Inactive';
+            streamBadge.className = 'badge';
+          }
+          if (ircBadge) {
+            ircBadge.textContent = 'Chat: Disconnected';
+            ircBadge.className = 'badge';
+          }
+        }
+      } catch (err) {}
     }
 
     function setupMinMaxSync() {
@@ -1963,3 +2330,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 @app.get("/", response_class=HTMLResponse)
 def index_page():
     return HTMLResponse(content=DASHBOARD_HTML)
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.web.server:app", host="127.0.0.1", port=8000, reload=False)
