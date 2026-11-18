@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+import time
 from typing import Any
 
 from google.auth.transport.requests import Request
@@ -16,12 +17,44 @@ LOGGER = logging.getLogger(__name__)
 
 CLIENT_SECRET_FILE = Path("data/youtube_client_secret.json")
 TOKEN_FILE = Path("data/youtube_token.json")
+OAUTH_STATE_FILE = Path("data/.oauth_flow_states.json")
 
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
     "https://www.googleapis.com/auth/userinfo.profile",
 ]
+
+_ACTIVE_FLOWS: dict[str, Any] = {}
+
+
+def _save_flow_state(state: str, code_verifier: str | None, redirect_uri: str) -> None:
+    try:
+        OAUTH_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        states = {}
+        if OAUTH_STATE_FILE.is_file():
+            try:
+                states = json.loads(OAUTH_STATE_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        states[state] = {
+            "code_verifier": code_verifier,
+            "redirect_uri": redirect_uri,
+            "created_at": time.time(),
+        }
+        OAUTH_STATE_FILE.write_text(json.dumps(states, indent=2), encoding="utf-8")
+    except Exception as exc:
+        LOGGER.warning("Could not persist OAuth flow state: %s", exc)
+
+
+def _get_saved_flow_state(state: str) -> dict[str, Any] | None:
+    try:
+        if OAUTH_STATE_FILE.is_file():
+            states = json.loads(OAUTH_STATE_FILE.read_text(encoding="utf-8"))
+            return states.get(state)
+    except Exception:
+        pass
+    return None
 
 
 def has_client_secret() -> bool:
@@ -49,20 +82,37 @@ def get_auth_url(redirect_uri: str) -> tuple[str, str]:
         include_granted_scopes="true",
         prompt="consent",
     )
+    _ACTIVE_FLOWS[state] = flow
+    _save_flow_state(state, getattr(flow, "code_verifier", None), redirect_uri)
     return auth_url, state
 
 
-def exchange_code(code: str, redirect_uri: str) -> dict[str, Any]:
+def exchange_code(code: str, redirect_uri: str, state: str = "") -> dict[str, Any]:
     """Exchange authorization code for OAuth tokens and persist."""
     if not has_client_secret():
         raise FileNotFoundError(f"YouTube client secrets file not found: {CLIENT_SECRET_FILE}")
 
-    flow = InstalledAppFlow.from_client_secrets_file(
-        str(CLIENT_SECRET_FILE),
-        scopes=SCOPES,
-        redirect_uri=redirect_uri,
-    )
-    flow.fetch_token(code=code)
+    flow = _ACTIVE_FLOWS.pop(state, None) if state else None
+    code_verifier = None
+
+    if flow is None:
+        flow = InstalledAppFlow.from_client_secrets_file(
+            str(CLIENT_SECRET_FILE),
+            scopes=SCOPES,
+            redirect_uri=redirect_uri,
+        )
+        saved = _get_saved_flow_state(state) if state else None
+        if saved and saved.get("code_verifier"):
+            code_verifier = saved["code_verifier"]
+            flow.code_verifier = code_verifier
+    else:
+        code_verifier = getattr(flow, "code_verifier", None)
+
+    fetch_kwargs = {"code": code}
+    if code_verifier:
+        fetch_kwargs["code_verifier"] = code_verifier
+
+    flow.fetch_token(**fetch_kwargs)
     credentials = flow.credentials
     save_credentials(credentials)
     return get_channel_info()

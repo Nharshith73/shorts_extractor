@@ -892,7 +892,7 @@ def api_youtube_auth_url(request: Request):
 
 
 @app.get("/api/youtube/oauth2callback")
-def api_youtube_oauth_callback(request: Request, code: str = "", error: str = ""):
+def api_youtube_oauth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     """OAuth redirect handler from Google consent screen."""
     if error:
         return HTMLResponse(f"""<!DOCTYPE html><html><body style="font-family:sans-serif;padding:30px;">
@@ -914,7 +914,7 @@ def api_youtube_oauth_callback(request: Request, code: str = "", error: str = ""
         redirect_uri = redirect_uri.replace("127.0.0.1", "localhost")
 
     try:
-        info = exchange_code(code, redirect_uri)
+        info = exchange_code(code, redirect_uri, state=state)
         return HTMLResponse(f"""<!DOCTYPE html><html><body style="font-family:sans-serif;padding:30px;">
         <script>
             if (window.opener) {{
