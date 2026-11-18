@@ -1,6 +1,7 @@
 """ASS phrase captions with discrete current-word highlighting."""
 
 from pathlib import Path
+import re
 from typing import Sequence
 
 from .config import RenderConfig
