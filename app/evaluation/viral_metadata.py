@@ -221,7 +221,8 @@ class ViralMetadataGenerator:
                 "2. 'suggested_hook': 3-5 punchy words in ALL CAPS with an emoji for on-screen caption text (e.g. 'BRO REALLY THOUGHT 💀').\n"
                 "3. 'description': Engaging, natural 2-sentence story summary written in entertaining streamer language. "
                 "NEVER include mechanical chat telemetry like 'chat surged 2.7x baseline' or 'messages in 10s'. Focus on the human story and viewer excitement.\n"
-                "4. 'tags': Array of 15 to 20 optimized, search-friendly tags for YouTube Shorts algorithm.\n"
+                "4. 'tags': Array of 15 to 25 optimized, search-friendly tags for YouTube Shorts algorithm. "
+                "Always include high-volume GTA tags ('gta6', 'gta iv', 'gta 4', 'gta 5', 'gta v', 'grand theft auto', 'vice city', 'gta rp') alongside streamer, funny, and gaming tags.\n"
                 "5. 'call_to_action': 1-sentence spicy question to pin in the comments to drive replies.\n"
                 "Return strictly valid JSON matching this schema:\n"
                 '{"title": "...", "suggested_hook": "...", "description": "...", "tags": ["..."], "call_to_action": "..."}'
@@ -376,7 +377,24 @@ class ViralMetadataGenerator:
 
     @classmethod
     def _build_tags(cls, creator: str, platform: str, category: str, dialogue: str) -> list[str]:
-        """Generate high-performing YouTube Shorts & SEO tag list."""
+        """Generate high-performing YouTube Shorts & SEO tag list with GTA & viral gaming reach."""
+        gta_tags = [
+            "gta6",
+            "gta 6",
+            "gtaiv",
+            "gta iv",
+            "gta 4",
+            "gtav",
+            "gta 5",
+            "gta v",
+            "grand theft auto",
+            "gta rp",
+            "vice city",
+            "gta online",
+            "gta funny",
+            "gta clips",
+        ]
+
         base_tags = [
             "Shorts",
             "YouTubeShorts",
@@ -411,13 +429,13 @@ class ViralMetadataGenerator:
 
         all_tags = []
         seen = set()
-        for t in creator_tags + platform_tags + base_tags:
+        for t in gta_tags + creator_tags + platform_tags + base_tags:
             t_norm = t.lower().strip()
             if t_norm and t_norm not in seen:
                 seen.add(t_norm)
                 all_tags.append(t)
 
-        return all_tags[:20]
+        return all_tags[:25]
 
     @classmethod
     def _format_structured_description(
@@ -431,7 +449,17 @@ class ViralMetadataGenerator:
     ) -> str:
         """Standard high-converting YouTube Shorts description layout with natural storytelling."""
         creator_tag = f"@{creator.lstrip('@')}" if creator else "@Streamer"
-        hashtag_cloud = " ".join([f"#{t.replace(' ', '')}" for t in tags[:10] if not t.startswith("#")])
+
+        # Prioritize GTA hashtags in the description hashtag cloud
+        gta_cloud = ["#Shorts", "#GTA6", "#GTAIV", "#GTAV", "#ViceCity", "#GTARP", "#Gaming"]
+        seen_tags = {h.lower() for h in gta_cloud}
+        extra_tags = []
+        for t in tags:
+            tag_clean = "#" + re.sub(r"[^\w]", "", t)
+            if tag_clean.lower() not in seen_tags and len(tag_clean) > 2:
+                seen_tags.add(tag_clean.lower())
+                extra_tags.append(tag_clean)
+        full_hashtag_cloud = " ".join((gta_cloud + extra_tags)[:12])
 
         lines = [
             f"{hook} 🔥💀",
@@ -440,12 +468,12 @@ class ViralMetadataGenerator:
             "",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             f"📺 Streamer: {creator_tag}",
-            "🌟 Daily Viral Stream Highlights & Clutch Reactions",
+            "🌟 Daily Viral GTA & Stream Highlights",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             "",
             f"💬 {cta}",
             "👉 LIKE & SUBSCRIBE for daily viral gaming shorts! 🔔",
             "",
-            f"#Shorts {hashtag_cloud}",
+            full_hashtag_cloud,
         ]
         return "\n".join(lines).strip()
