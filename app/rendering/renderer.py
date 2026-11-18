@@ -43,10 +43,10 @@ def extract_audio(source: Path, output: Path, start: float, duration: float) -> 
 
 
 def stage_fonts(directory: Path, destination: Path) -> str:
-    destination.mkdir()
+    destination.mkdir(parents=True, exist_ok=True)
     if directory.is_dir():
         for path in directory.iterdir():
-            if path.is_file() and path.suffix.lower() in (".ttf", ".otf"):
+            if path.is_file() and path.suffix.lower() in (".ttf", ".otf", ".ttc"):
                 shutil.copyfile(path, destination / path.name)
     return font_family(destination)
 

@@ -23,8 +23,8 @@ class RenderConfig:
     compute_type: str = "int8"
     device: str = "cpu"
     language: str = "auto"
-    min_avg_logprob: float = -1.0
-    max_no_speech_prob: float = 0.6
+    min_avg_logprob: float = -1.5
+    max_no_speech_prob: float = 0.75
     captions_enabled: bool = True
     caption_style: str = "bold_yellow"
     uppercase: bool = True

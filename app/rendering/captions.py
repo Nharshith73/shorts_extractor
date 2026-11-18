@@ -14,11 +14,15 @@ STYLES = {
 
 
 def font_family(directory: Path) -> str:
-    names = {path.stem.casefold() for path in directory.iterdir() if path.suffix.lower() in (".ttf", ".otf")} if directory.is_dir() else set()
+    names = {path.stem.casefold() for path in directory.iterdir() if path.suffix.lower() in (".ttf", ".otf", ".ttc")} if directory.is_dir() else set()
     if any(name == "anton" or name.startswith("anton-") for name in names):
         return "Anton"
     if "poppins-bold" in names:
         return "Poppins"
+    if "ariblk" in names or "arial-black" in names:
+        return "Arial Black"
+    if "nirmala" in names:
+        return "Nirmala UI"
     return "Arial Black"
 
 
@@ -36,7 +40,7 @@ def phrase_groups(words: Sequence[Word], config: RenderConfig) -> list[list[Word
         previous = groups[-1] if groups else []
         length = len(" ".join(display_word(item.text, config.uppercase) for item in [*previous, word]))
         if (not previous or len(previous) >= config.max_words or length > width_budget
-            or word.start - previous[-1].end > 0.5 or previous[-1].text.endswith((".", "!", "?"))):
+            or word.start - previous[-1].end > 0.8 or previous[-1].text.endswith((".", "!", "?"))):
             groups.append([word])
         else:
             previous.append(word)
@@ -52,6 +56,12 @@ def ass_time(seconds: float) -> str:
 
 
 def generate_ass(words: Sequence[Word], config: RenderConfig, family: str, duration: float = 60.0) -> str:
+    # If any recognized word contains Indic / Devanagari characters, automatically
+    # use Nirmala UI to prevent missing glyphs / tofu boxes in libass rendering.
+    all_text = " ".join(w.text for w in words)
+    if any("\u0900" <= ch <= "\u0d7f" for ch in all_text):
+        family = "Nirmala UI"
+
     base, highlight, border, back = STYLES[config.caption_style]
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -82,22 +92,23 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         phrase = [display_word(word.text, config.uppercase) for word in group]
         # Fit unusually long individual words rather than overflowing safe margins.
         font_size = min(config.font_size, int((1080 - 2 * config.margin_horizontal) / (max(1, len(" ".join(phrase))) * 0.65)))
+        cursor = group[0].start
         for index, word in enumerate(group):
+            w_start = max(cursor, word.start)
             if index + 1 < len(group):
-                end = group[index + 1].start
+                w_end = max(w_start + 0.12, group[index + 1].start)
             else:
-                # For the last word of a group, hold the completed phrase on screen
-                # until the next phrase begins (or up to 0.75s sustain) so captions don't
-                # abruptly vanish and feel like they are flying by too fast!
+                # Hold completed phrase until next phrase begins (or up to 0.75s sustain)
                 if g_idx + 1 < len(groups):
                     next_start = groups[g_idx + 1][0].start
-                    end = max(word.end, min(next_start, word.end + 0.75))
+                    w_end = max(word.end, min(next_start, word.end + 0.75))
                 else:
-                    end = max(word.end, word.start + 0.5)
+                    w_end = max(word.end, w_start + 0.6)
+            cursor = w_end
 
-            if round(end * 100) <= round(word.start * 100):
+            if round(w_end * 100) <= round(w_start * 100):
                 continue
             text = " ".join(f"{{\\1c{highlight_bgr}}}{token}{{\\1c{base_bgr}}}" if at == index else token
                             for at, token in enumerate(phrase))
-            lines.append(f"Dialogue: 0,{ass_time(word.start)},{ass_time(end)},Caption,,0,0,0,,{{\\fs{font_size}}}{text}\n")
+            lines.append(f"Dialogue: 0,{ass_time(w_start)},{ass_time(w_end)},Caption,,0,0,0,,{{\\fs{font_size}}}{text}\n")
     return "".join(lines)

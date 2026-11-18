@@ -299,7 +299,7 @@ class LiveWatcherSession:
                     probability=w.probability,
                 )
                 for w in raw_words
-                if snapped_start <= w.start <= snapped_end
+                if w.end > snapped_start and w.start < snapped_end
             ]
 
             # 5. AI Editorial Filter / Hook Generation (optional)
@@ -472,18 +472,42 @@ def create_test_short(
     for d in (shorts_dir, meta_dir, work_dir):
         d.mkdir(parents=True, exist_ok=True)
 
-    # 1. Fast synthesis of 30s test footage with audio
+    # 1. Use real stream/inbox footage if available, or fast synthesis fallback
     source_mp4 = work_dir / "test_source.mp4"
-    cmd = [
-        "ffmpeg", "-y",
-        "-f", "lavfi", "-i", f"testsrc2=size=1280x720:rate=30:duration={duration_seconds:.1f}",
-        "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate=44100:duration={duration_seconds:.1f}",
-        "-c:v", "libx264", "-preset", "ultrafast",
-        "-c:a", "aac", "-t", f"{duration_seconds:.1f}",
-        str(source_mp4),
-    ]
     import subprocess
-    subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+    real_video = None
+    inbox_files = sorted(list(Path("data/inbox").glob("*.mp4")) + list(Path("data/inbox").glob("*.mkv")), key=lambda p: p.stat().st_mtime, reverse=True)
+    if inbox_files:
+        real_video = inbox_files[0]
+    else:
+        rec_files = sorted(list(output_dir.glob("**/live_stream.ts")), key=lambda p: p.stat().st_mtime, reverse=True)
+        if rec_files:
+            real_video = rec_files[0]
+
+    if real_video and real_video.is_file():
+        cmd = [
+            "ffmpeg", "-y", "-ss", "10", "-i", str(real_video),
+            "-t", f"{duration_seconds:.1f}",
+            "-vf", "setpts=PTS-STARTPTS", "-af", "asetpts=PTS-STARTPTS",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+            "-c:a", "aac", str(source_mp4),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=60)
+        except Exception as exc:
+            LOGGER.warning("Cutting test reel from real video failed, falling back to synthesis: %s", exc)
+            real_video = None
+
+    if not real_video or not source_mp4.is_file():
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", f"testsrc2=size=1280x720:rate=30:duration={duration_seconds:.1f}",
+            "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate=44100:duration={duration_seconds:.1f}",
+            "-c:v", "libx264", "-preset", "ultrafast",
+            "-c:a", "aac", "-t", f"{duration_seconds:.1f}",
+            str(source_mp4),
+        ]
+        subprocess.run(cmd, check=True, capture_output=True, timeout=30)
 
     info = probe_media(source_mp4)
     selector = EncoderSelector(requested=encoder)
@@ -494,14 +518,27 @@ def create_test_short(
         creator_credit=creator_credit,
     )
 
-    # 2. Add sample viral subtitles
-    words = [
-        Word(start=1.0, end=4.5, text="LIVE STREAMER MOMENT!", probability=1.0),
-        Word(start=5.0, end=9.5, text="Chat is going crazy!", probability=1.0),
-        Word(start=10.0, end=15.0, text="30-Second Reel Cut", probability=1.0),
-        Word(start=15.5, end=20.0, text="Spike Detection Active", probability=1.0),
-        Word(start=20.5, end=28.0, text="Ready for YouTube Shorts", probability=1.0),
-    ]
+    # 2. Add subtitles (transcribe real video or use sample subtitles)
+    words = []
+    if real_video and real_video.is_file():
+        try:
+            test_audio = work_dir / "test_audio.wav"
+            extract_audio(source_mp4, test_audio, 0.0, duration_seconds)
+            transcriber = WhisperTranscriber(render_cfg)
+            tr = transcriber.transcribe(test_audio)
+            usable, _ = usable_words(tr, render_cfg, duration_seconds)
+            words = usable
+        except Exception as exc:
+            LOGGER.warning("Transcribing real test clip failed: %s", exc)
+
+    if not words:
+        words = [
+            Word(start=1.0, end=4.5, text="LIVE STREAMER MOMENT!", probability=1.0),
+            Word(start=5.0, end=9.5, text="Chat is going crazy!", probability=1.0),
+            Word(start=10.0, end=15.0, text="30-Second Reel Cut", probability=1.0),
+            Word(start=15.5, end=20.0, text="Spike Detection Active", probability=1.0),
+            Word(start=20.5, end=28.0, text="Ready for YouTube Shorts", probability=1.0),
+        ]
 
     out_mp4 = shorts_dir / f"test_clip_{int(duration_seconds)}s.mp4"
     render_original(
