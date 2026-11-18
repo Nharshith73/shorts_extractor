@@ -461,12 +461,6 @@ def main() -> int:
                 end="",
                 flush=True,
             )
-                f"Median: {status['current_median']} | "
-                f"Spikes: {status['spikes_detected']} | "
-                f"Shorts: {status['shorts_count']}",
-                end="",
-                flush=True,
-            )
     except KeyboardInterrupt:
         print("\nStopping Live Watcher Session...")
         session.stop()
